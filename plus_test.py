@@ -53,8 +53,8 @@ def validate_callback(query, expected_state, issued_client=None):
     return client, code
 
 
-def main():
-    print("DISPATCH - Continue with ChatGPT connection test")
+def authenticate():
+    print("DISPATCH - Continue with ChatGPT")
     print("Uses your ChatGPT plan allowance. Does not load an API key or call paid voice APIs.")
     print("Tokens stay in memory for this test; browser credentials are never read by Dispatch.")
     print("Review the permissions in the official OpenAI browser page before approving.\n")
@@ -146,6 +146,13 @@ def main():
     if not choice.isdigit() or not 1 <= int(choice) <= len(models):
         raise RuntimeError("Invalid model selection. Run the test again.")
     model = models[int(choice) - 1]["slug"]
+    tokens["client_id"] = result["client"]
+    tokens["expires_at"] = time.time() + int(tokens.get("expires_in", 3600))
+    return tokens, model
+
+
+def main():
+    tokens, model = authenticate()
     print("\nRequesting one short reply through your ChatGPT allowance...")
     client = OpenAI(api_key=tokens["access_token"], base_url=RESOURCE, max_retries=0, timeout=45)
     completed = False

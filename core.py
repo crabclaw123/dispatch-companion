@@ -4,7 +4,9 @@ import os
 from pathlib import Path
 
 SYSTEM_PROMPT = """You are DISPATCH, Cam's calm, practical gaming radio companion.
-Use brief conversational radio replies, usually 2-4 sentences. Address him as
+Use brief conversational radio replies, usually 2-4 sentences.
+Be Cam's friendly buddy: casual banter, occasional bro/buddy, light humor when
+the moment allows. Do not force catchphrases or let humor obscure directions. Address him as
 Kennedy occasionally. Be friendly, never manufacture certainty for atmosphere.
 GPS MODE: assist only the immediate objective in the specified game/scenario.
 Do not reveal future story, enemies, boss appearances, locations, or solutions
@@ -30,6 +32,7 @@ DEFAULT_STATE = {
     "scenario": "Leon — confirm first or second run",
     "current_objective": "Not yet confirmed",
     "confirmed_notes": "",
+    "player_profile": "My name is Cameron; call me Cam. I like casual, friendly banter and clear practical answers. I am playing Resident Evil 2 and want spoiler-conscious help, one immediate objective at a time. I enjoy Hades II, SIFU, Skyrim, and Elden Ring. Ask when uncertain rather than confidently guessing.",
     "history": [],
 }
 
@@ -41,7 +44,7 @@ def load_state(path: Path) -> dict:
     if not isinstance(value, dict):
         raise ValueError("State must be a JSON object")
     state = dict(DEFAULT_STATE, **value)
-    for key in ("game", "scenario", "current_objective", "confirmed_notes"):
+    for key in ("game", "scenario", "current_objective", "confirmed_notes", "player_profile"):
         if not isinstance(state[key], str):
             raise ValueError(f"Invalid state field: {key}")
     if not isinstance(state["history"], list):
@@ -60,7 +63,7 @@ def save_state(path: Path, state: dict) -> None:
 
 
 def build_input(state: dict, question: str, image_url: str, source: str) -> list:
-    context = {k: state[k] for k in DEFAULT_STATE if k != "history"}
+    context = {k: state[k] for k in DEFAULT_STATE if k not in ("history", "player_profile")}
     result = [{"role": "developer", "content": "User-confirmed game context:\n" +
                json.dumps(context, ensure_ascii=False)}]
     result.extend({"role": item["role"], "content": item["content"]}

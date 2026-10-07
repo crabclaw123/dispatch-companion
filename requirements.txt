@@ -5,3 +5,5 @@ Pillow>=10,<13
 sounddevice>=0.5,<1
 pynput>=1.7,<2
 python-dotenv>=1,<2
+PyJWT[crypto]>=2.8,<3
+faster-whisper>=1.1,<2

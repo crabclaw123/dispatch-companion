@@ -1,107 +1,94 @@
-# DISPATCH 📡
+# DISPATCH 📡 — ChatGPT plan + local voice
 
-A Windows, capture-on-demand gaming radio companion. Hold **F8**, ask a
-question, release the key, and hear a short answer based on one screenshot and
-your saved game context. First profile: **Resident Evil 2 Remake**.
+Windows gaming companion: hold F8, capture a game frame, ask aloud, release,
+and hear an OpenAI model reply using your ChatGPT plan allowance.
 
-## First launch
+## Updating from the first build
 
-1. Install **Python 3.11 or 3.12 for Windows** from https://www.python.org/downloads/windows/.
-   Include the Python launcher. No administrator launch is needed.
-2. Clone this repo (or download and extract its ZIP):
-   ```powershell
-   git clone https://github.com/crabclaw123/dispatch-companion.git
-   cd dispatch-companion
-   ```
-3. Double-click **setup.bat**. It creates a virtual environment and installs dependencies.
-4. Open the newly created **.env** in Notepad. Put your own OpenAI API key after
-   `OPENAI_API_KEY=` and save. Create/manage keys at https://platform.openai.com/api-keys.
-   Keep the key on your own PC; do not send it in chat or put it in GitHub.
-   API use requires separate API billing; a ChatGPT subscription does not cover it.
-5. Double-click **launch.bat**.
-6. Start RE2 in **borderless/windowed mode**. Keep the game visible and unobstructed.
-7. Select the microphone and headphones you use for gaming. Start with System default.
-8. Click **Test capture (no API)**. If it cannot find the game, change the window-title
-   fragment or select the specific monitor with the game on it. This is a visible-screen
-   capture, not an injected game hook. A minimized or obscured window will not work.
-9. Close the preview. In **Confirmed game notes**, set your scenario, difficulty,
-   current objective, and any facts you actually know. Click **Save confirmed notes**.
-   No old ChatGPT conversation has been imported automatically.
-10. Enable the F8 checkbox. Return to RE2. Hold **F8**, wait until Dispatch shows
-    **LISTENING**, speak, and release. The screenshot is taken when F8 begins,
-    not when you release it. Open your map *before* F8 when asking for a route.
+1. Close Dispatch and run `git pull` in your repo terminal.
+2. Double-click **setup.bat** to install the new local-voice dependencies.
+3. Double-click **launch.bat**. This now launches the **Plus version**.
+4. Sign in through your browser with the ChatGPT account you connected during
+   the test. Return to the console and choose a model number.
+5. The app opens and prepares local speech recognition. Its first launch
+   downloads the `base.en` Whisper model from Hugging Face; allow a few minutes.
+6. Wait for **READY**. Choose your headset microphone and headphones output.
+7. Start RE2 in borderless/windowed mode. Click **Test capture (no API)**,
+   verify the image, then close the preview before asking questions.
+8. Review **About Cam** and **Confirmed game notes**. Set your scenario,
+   difficulty, objective, and confirmed inventory/location; save.
+9. Enable F8, return to the game, hold F8 for your question, and release to send.
+   Wait briefly for the microphone to open before speaking. Screenshot capture
+   happens at the beginning of the question. Open the map *before* F8 for routing.
 
-There is also a **Start mic / Stop mic** button and a typed **Ask + capture**
-fallback. Typed questions still use the screenshot, model, and spoken reply.
-**F9** stops voice/cancels a turn. An already-submitted API request can still
-finish and incur charges; the app waits for it before accepting another turn.
-Mic recordings stop at 30 seconds. F8 is not suppressed and may also reach the
-game; unbind F8 in your game if necessary.
+**No API key is needed. `.env` is no longer loaded. No paid API fallback exists.**
+The app uses your shared ChatGPT allowance, subject to account/model access,
+app limits, and any credits settings you authorize in ChatGPT. Review these
+in ChatGPT Settings → Usage. This is not unlimited usage.
 
-## Tonight's QA checklist
+For a fresh installation, install Python 3.11/3.12 for Windows including its
+launcher, clone this repo, run setup.bat, then launch.bat. In Git Bash use File
+Explorer to double-click the batch files rather than PowerShell syntax.
 
-- Capture test shows RE2, not Dispatch/another window, and map text is readable.
-- Ask “What can you see?” with a simple game frame. Compare its reply to the frame.
-- Open the map, then ask “Where am I?” It should admit uncertainty if labels are unreadable.
-- Ask a route question with your objective and scenario filled in.
-- Verify a second question retains the conversation.
-- Press F9 during playback; speech should stop. During an API call cancellation
-  waits for that call to return and discards its result when possible.
-- Close/reopen; confirmed notes and the last six exchanges should remain.
-- Confirm no .env, screenshots, recordings, or local/state.json appear in `git status`.
+## Controls and data
 
-## What v0.1 does and does not establish
+- **F8**: hold to capture/record, release to send (maximum 30 seconds).
+- **F9**: cancel or stop voice; a sent request can still consume allowance.
+- **Start mic / Stop mic**: button fallback.
+- **Ask + capture**: typed question fallback, still with image and spoken answer.
+- **Test capture**: local preview only, consumes no model allowance.
+- **About Cam**: editable profile supplied to the model. Account memory/chats are
+  not imported. Seed contains only relevant gaming preferences and preferred tone.
+- **Confirmed game notes**: manually verified progress; advice is not completion.
+- **Clear radio history**: keeps profile and game notes; removes conversation history.
 
-The chain is recorded speech → transcription → image + question through the
-Responses API → text-to-speech → headphones. Defaults are `gpt-4.1`,
-`gpt-4o-mini-transcribe`, and `gpt-4o-mini-tts`. Model names and voice are editable
-in .env. Availability depends on your API account. No continuous video analysis,
-automatic inventory detection, or verified walkthrough retrieval is included.
+Local Whisper runs on CPU with four threads. Windows System.Speech synthesizes
+replies to a temporary WAV, plays through the selected output, and deletes it.
+Mic recordings stay in memory and are transcribed locally. Only the screenshot,
+question text, recent conversation and saved context are sent to OpenAI.
+Screenshots are not saved by Dispatch. Text notes/history are saved to
+`local/state.json`, excluded from Git. OAuth tokens stay in memory and refresh
+as needed during a session; each launch signs in again. Only non-secret account
+registration and host identifiers are saved under `%LOCALAPPDATA%/DispatchCompanion`.
+You can disconnect the app in ChatGPT Settings. The local voice is synthetic.
 
-The prompt asks for immediate-objective spoilers only, explicit uncertainty,
-and a distinction between observed, confirmed, and recalled information. Those
-are model instructions, **not a guarantee** of accurate navigation or no spoilers.
-When unsure, Dispatch should ask you to open your map/inventory rather than
-inventing a route. Future work: grounded game knowledge and structured state updates.
+## Limitations / tonight's QA
 
-Screenshots and mic audio live in memory and are sent to OpenAI for each question.
-They are not saved by the app. API service data handling still applies. Response
-requests use `store=False`. The text radio history and confirmed notes are saved
-locally in **local/state.json**, excluded from Git. Clearing radio history keeps
-your confirmed notes. Microphone and capture choices currently reset on relaunch.
-The spoken voice is AI-generated.
+This is a first integrated build. The Plus text-only test succeeded on the
+user PC; the screenshot + local mic + Windows voice loop still needs Windows
+end-to-end testing. The build environment verifies compilation, state handling,
+mock audio, streamed completion/failure, cancellation and token refresh.
 
-## Troubleshooting
+The prompt asks for brief friendly banter, immediate-objective spoilers only,
+and uncertainty when maps are unclear. These are instructions, not guarantees
+of accurate navigation/no spoilers. There is no walkthrough retrieval, live
+video analysis, automatic inventory updates or automatic progress recognition.
 
-| Problem | First check |
+First test: typed **What can you see?** with RE2 visible. Check both text and
+voice. Next test: ask it aloud with F8. Verify the transcript, answer, correct
+headphones and retained context. F9 should stop playback. Close/reopen to test
+saved notes/profile. Local device choices currently reset on relaunch.
+
+| Issue | First check |
 | --- | --- |
-| Black or wrong screenshot | Borderless mode; correct monitor; game unobstructed; close preview |
-| No matching window | Game running, not minimized; try title fragment `RESIDENT EVIL` or your game monitor |
-| F8 does nothing | Enable checkbox; hold until LISTENING; try mic button; keep game and app at the same permission level |
-| Silence / wrong mic | Windows microphone permissions for desktop apps; choose headset input; mute switch |
-| Reply appears but no audio | Select headphones output; Windows volume mixer; text reply remains available |
-| API key rejected | Correct .env key, save, restart; avoid whitespace or placeholder text |
-| Quota / rate limit | API billing, project budget/limits, account model access |
-| Slow reply | This first version has three sequential API calls and buffers generated speech before playback |
-| Damaged state | Rename local/state.json as a backup; relaunch to create fresh state |
+| First launch sits at preparing | Speech model downloading; check console/internet. If download fails, typed questions still work. |
+| Wrong/black image | Correct monitor, borderless mode, game unobstructed and not minimized |
+| Game window not found | Change title fragment from RESIDENT EVIL or choose the game monitor |
+| F8 fails | Enable checkbox; same Windows permission level as game; try mic button |
+| Wrong transcription | Correct headset mic, Windows desktop mic permission, quieter background |
+| Text reply but no voice | Correct headphones/volume; Windows speech synthesis available; read radio log error |
+| Plan limit reached | ChatGPT Settings → Usage; no automatic paid fallback |
+| Session/account error | Restart and sign in again; saved registration is tied to the original account |
 
-## Development
+## Development / references
 
-```powershell
-.venv\Scripts\python.exe -m unittest discover -s tests -v
-.venv\Scripts\python.exe -m compileall -q core.py devices.py dispatch.py
-```
+`python -m unittest discover -s tests -v`
 
-`core.py` contains state/request logic, `devices.py` owns capture/audio, and
-`dispatch.py` owns UI/worker orchestration. UI work stays on the Tk main thread;
-network/audio work runs on one background worker. No API key is needed for tests.
+`core.py`: state/prompt; `devices.py`: capture/audio; `plan_connection.py`: streamed
+plan inference/refresh; `local_voice.py`: CPU transcription/Windows speech;
+`plus_test.py`: OAuth + standalone connection test; `dispatch.py`: desktop UI.
 
-Reference implementations follow the official API guides:
-- https://developers.openai.com/api/docs/guides/images-vision
-- https://developers.openai.com/api/docs/guides/speech-to-text
-- https://developers.openai.com/api/docs/guides/text-to-speech
-
-Validation in the build environment covers state, payloads, audio encoding,
-cancelled playback, and Python compilation with device mocks.
-Actual RE2 capture, global Windows hotkey, physical microphone/headset, and live
-API end-to-end behavior require testing on the gaming PC.
+- https://developers.openai.com/siwc/token-sharing-open-source/sign-in
+- https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference
+- https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations
+- https://github.com/SYSTRAN/faster-whisper

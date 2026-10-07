@@ -12,7 +12,7 @@ if errorlevel 1 goto failed
 if errorlevel 1 goto failed
 if not exist .env copy .env.example .env >nul
 echo.
-echo Setup complete. Edit .env to add your OpenAI API key, then run launch.bat.
+echo Setup complete. Run launch.bat and sign in with ChatGPT. No API key needed.
 pause
 exit /b 0
 :failed

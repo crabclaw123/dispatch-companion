@@ -10,23 +10,25 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from tkinter.scrolledtext import ScrolledText
 
-from dotenv import load_dotenv
-from openai import OpenAI, AuthenticationError, RateLimitError, APIConnectionError
+from openai import AuthenticationError, RateLimitError, APIConnectionError
 from PIL import ImageTk
 from pynput import keyboard
 import mss
 import sounddevice as sd
 
 from core import SYSTEM_PROMPT, load_state, save_state, build_input, append_turn
-from devices import enable_dpi_awareness, capture, record, play_wav
+from devices import enable_dpi_awareness, capture, record
+from plus_test import authenticate
+from plan_connection import PlanConnection
+from local_voice import LocalVoice, speak
 
 ROOT = Path(__file__).resolve().parent
 STATE_PATH = ROOT / "local" / "state.json"
-load_dotenv(ROOT / ".env")
+
 
 
 class Dispatch:
-    def __init__(self, root):
+    def __init__(self, root, connection):
         self.root = root
         self.events = queue.Queue()
         self.busy = False
@@ -41,12 +43,12 @@ class Dispatch:
         self.preview_window = None
         self.hotkeys_enabled = threading.Event()
         self.state = load_state(STATE_PATH)
-        self.client = None
-        key = os.getenv("OPENAI_API_KEY", "").strip()
-        if key:
-            self.client = OpenAI(api_key=key, timeout=45, max_retries=0)
+        self.client = connection
+        self.voice = LocalVoice()
         self._ui()
         self._hotkeys()
+        self._start(lambda options, state: self.voice.prepare(), False)
+        self.status.set("PREPARING LOCAL VOICE · first launch downloads the speech model")
         self.root.after(40, self._poll)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
 
@@ -66,7 +68,7 @@ class Dispatch:
         ttk.Label(frame, text="Hold F8 → wait for LISTENING → ask → release F8", font=("Segoe UI", 11)).pack(anchor="w", pady=(2, 12))
         self.status = tk.StringVar(value="READY" if self.client else "SETUP · Add OPENAI_API_KEY to .env, then restart")
         ttk.Label(frame, textvariable=self.status, font=("Segoe UI", 12, "bold"), wraplength=720).pack(anchor="w", pady=6)
-        ttk.Label(frame, text="Voice is AI-generated. Each question uses paid API calls. No continuous recording.", wraplength=720).pack(anchor="w")
+        ttk.Label(frame, text="Plus allowance · Local microphone transcription and Windows voice · No paid API fallback.", wraplength=720).pack(anchor="w")
 
         settings = ttk.Frame(frame)
         settings.pack(fill="x", pady=12)
@@ -110,6 +112,13 @@ class Dispatch:
         notes = ttk.Frame(notebook, padding=10)
         notebook.add(conversation, text="Radio log")
         notebook.add(notes, text="Confirmed game notes")
+        profile = ttk.Frame(notebook, padding=10)
+        notebook.add(profile, text="About Cam")
+        ttk.Label(profile, text="Editable context sent with questions. This is separate from your ChatGPT account memory.", wraplength=690).pack(anchor="w", pady=8)
+        self.profile = ScrolledText(profile, wrap="word", bg="#17232e", fg="#e4eef5", insertbackground="white")
+        self.profile.insert("1.0", self.state.get("player_profile", ""))
+        self.profile.pack(fill="both", expand=True)
+        ttk.Button(profile, text="Save profile", command=self.save_notes).pack(anchor="w", pady=8)
         self.log = ScrolledText(conversation, wrap="word", bg="#17232e", fg="#e4eef5", font=("Segoe UI", 11), state="disabled")
         self.log.pack(fill="both", expand=True)
         entry_bar = ttk.Frame(conversation)
@@ -138,7 +147,7 @@ class Dispatch:
         ttk.Button(note_bar, text="Save confirmed notes", command=self.save_notes).pack(side="left")
         self.clear_button = ttk.Button(note_bar, text="Clear radio history", command=self.clear_history)
         self.clear_button.pack(side="left", padx=8)
-        ttk.Label(frame, text="v0.1 · One frame per question · F9 cancels · Max mic recording: 30 seconds").pack(anchor="w")
+        ttk.Label(frame, text="v0.2 · ChatGPT plan · One frame per question · F9 cancels · Max mic recording: 30 seconds").pack(anchor="w")
         for item in self.state["history"]:
             self.write_log("YOU" if item["role"] == "user" else "DISPATCH", item["content"])
 
@@ -189,6 +198,7 @@ class Dispatch:
         for key, variable in self.fields.items():
             self.state[key] = variable.get().strip()
         self.state["confirmed_notes"] = self.notes.get("1.0", "end").strip()
+        self.state["player_profile"] = self.profile.get("1.0", "end").strip()
         save_state(STATE_PATH, self.state)
         if announce:
             self.write_log("SYSTEM", "Confirmed notes saved locally.")
@@ -233,15 +243,15 @@ class Dispatch:
         try:
             target(options, state)
         except AuthenticationError:
-            self.events.put(("error", "API key rejected. Check .env, then restart."))
+            self.events.put(("error", "ChatGPT session rejected. Restart Dispatch to reconnect."))
         except RateLimitError:
-            self.events.put(("error", "API quota/rate limit. Check API billing and project limits; ChatGPT subscription does not fund this key."))
+            self.events.put(("error", "ChatGPT allowance/rate limit reached. Check ChatGPT Settings → Usage."))
         except APIConnectionError:
             self.events.put(("error", "Could not reach OpenAI. Check your internet connection."))
         except Exception as error:
             # Avoid printing API request bodies, keys, screenshots or raw server errors.
             from openai import APIStatusError
-            detail = f"OpenAI returned HTTP {error.status_code}. Check model access and API billing." if isinstance(error, APIStatusError) else str(error)
+            detail = f"OpenAI returned HTTP {error.status_code}. Check ChatGPT model access and plan allowance." if isinstance(error, APIStatusError) else str(error)
             if not self.cancel.is_set():
                 self.events.put(("error", detail))
         finally:
@@ -262,10 +272,7 @@ class Dispatch:
             if self.cancel.is_set():
                 return
             self.events.put(("status", "TRANSCRIBING"))
-            transcript = self.client.audio.transcriptions.create(
-                model=os.getenv("DISPATCH_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe"),
-                file=audio, prompt="Resident Evil 2, Leon Kennedy, RPD, Dispatch, licker, Mr. X.")
-            question = transcript.text.strip()
+            question = self.voice.transcribe(audio)
             if not question:
                 raise RuntimeError("No speech recognized. Try again with your headset mic.")
             self.respond(question, url, source, options[3], state)
@@ -296,27 +303,19 @@ class Dispatch:
             return
         self.events.put(("question", question))
         self.events.put(("status", "ANALYZING"))
-        response = self.client.responses.create(
-            model=os.getenv("DISPATCH_VISION_MODEL", "gpt-4.1"),
-            instructions=SYSTEM_PROMPT, input=build_input(state, question, url, source),
-            max_output_tokens=450, store=False)
+        profile = state.get("player_profile", "")
+        answer = self.client.answer(SYSTEM_PROMPT + "\nPlayer profile (not game progress):\n" + profile,
+                                    build_input(state, question, url, source), self.cancel)
         if self.cancel.is_set():
             return
-        answer = response.output_text.strip()
         if not answer:
             raise RuntimeError("Model returned no answer. Try again or check the configured vision model.")
         self.events.put(("answer", (question, answer)))
         self.events.put(("status", "GENERATING VOICE"))
-        with self.client.audio.speech.with_streaming_response.create(
-            model=os.getenv("DISPATCH_SPEECH_MODEL", "gpt-4o-mini-tts"),
-            voice=os.getenv("DISPATCH_VOICE", "onyx"), input=answer[:4000],
-            instructions="Speak calmly and clearly like a friendly radio dispatcher. No sound effects.",
-            response_format="wav") as speech:
-            content = speech.read()
         if self.cancel.is_set():
             return
-        self.events.put(("status", "RESPONDING"))
-        play_wav(content, output_device, self.play_stop)
+        self.events.put(("status", "RESPONDING · Windows voice"))
+        speak(answer, output_device, self.play_stop)
 
     def stop(self):
         self.cancel.set()
@@ -393,12 +392,15 @@ def main():
         raise SystemExit("Dispatch's desktop app currently supports Windows only.")
     enable_dpi_awareness()
     root = tk.Tk()
+    root.withdraw()
     try:
-        Dispatch(root)
+        connection = PlanConnection(*authenticate())
+        Dispatch(root, connection)
     except Exception as error:
         messagebox.showerror("Dispatch could not start", f"{type(error).__name__}: {error}\n\nIf state.json is damaged, rename local/state.json and relaunch.")
         root.destroy()
         raise SystemExit(1)
+    root.deiconify()
     root.mainloop()
 
 
