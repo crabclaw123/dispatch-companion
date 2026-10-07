@@ -86,7 +86,7 @@ class AudioTests(unittest.TestCase):
             def __exit__(self, *args):
                 pass
 
-        with patch.object(devices.mss, "mss", FakeScreen, create=True):
+        with patch.object(devices.mss, "MSS", FakeScreen, create=True):
             with self.assertRaisesRegex(RuntimeError, "no longer available"):
                 devices.capture("Monitor 2", "")
 
