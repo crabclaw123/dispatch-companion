@@ -1,0 +1,7 @@
+openai>=1.68.0,<3
+mss>=10,<11
+numpy>=1.26,<3
+Pillow>=10,<13
+sounddevice>=0.5,<1
+pynput>=1.7,<2
+python-dotenv>=1,<2
