@@ -3,6 +3,7 @@ import base64
 import ctypes
 from ctypes import wintypes
 import io
+import os
 import sys
 import threading
 import time
@@ -31,6 +32,7 @@ def game_rect(title_fragment: str):
     user32.IsIconic.argtypes = [wintypes.HWND]
     user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
     user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
     user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
     user32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
     matches = []
@@ -39,6 +41,12 @@ def game_rect(title_fragment: str):
     @callback_type
     def visit(hwnd, _):
         if user32.IsWindowVisible(hwnd):
+            process_id = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
+            # DISPATCH's own title contains "Resident Evil Companion". Never
+            # let its main window or capture preview win the game-title match.
+            if process_id.value == os.getpid():
+                return True
             buffer = ctypes.create_unicode_buffer(user32.GetWindowTextLengthW(hwnd) + 1)
             user32.GetWindowTextW(hwnd, buffer, len(buffer))
             if title_fragment.casefold() in buffer.value.casefold():
@@ -65,7 +73,7 @@ def game_rect(title_fragment: str):
 
 
 def capture(mode: str, fragment: str):
-    with mss.mss() as screen:
+    with mss.MSS() as screen:
         if mode == "Game window":
             rect, source = game_rect(fragment)
         else:
