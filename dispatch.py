@@ -12,7 +12,6 @@ from tkinter.scrolledtext import ScrolledText
 
 from openai import AuthenticationError, RateLimitError, APIConnectionError
 from PIL import ImageTk
-from pynput import keyboard
 import mss
 import sounddevice as sd
 
@@ -38,7 +37,8 @@ class Dispatch:
         self.record_stop = threading.Event()
         self.play_stop = threading.Event()
         self.cancel = threading.Event()
-        self.listener = None
+        self.hotkey_stop = threading.Event()
+        self.hotkey_thread = None
         self.photo = None
         self.preview_window = None
         self.hotkeys_enabled = threading.Event()
@@ -157,27 +157,39 @@ class Dispatch:
         widget.grid(row=row, column=1, sticky="ew", pady=3)
 
     def _hotkeys(self):
-        def press(key):
-            if key == keyboard.Key.f9:
-                self.cancel.set()
-                self.record_stop.set()
-                self.play_stop.set()
-                self.events.put(("stop", None))
-            if key == keyboard.Key.f8:
-                with self.key_lock:
-                    if not self.key_down and self.hotkeys_enabled.is_set():
-                        self.key_down = True
-                        self.record_stop.clear()
-                        self.events.put(("begin", None))
-
-        def release(key):
-            if key == keyboard.Key.f8:
-                with self.key_lock:
-                    self.key_down = False
+        # Poll Windows directly. Some games consume keyboard events before a
+        # pynput hook sees them, while GetAsyncKeyState still reflects the
+        # physical key even when the game owns focus.
+        def watch():
+            user32 = __import__("ctypes").windll.user32
+            f8_was_down = False
+            f9_was_down = False
+            while not self.hotkey_stop.wait(0.015):
+                f8_down = bool(user32.GetAsyncKeyState(0x77) & 0x8000)
+                f9_down = bool(user32.GetAsyncKeyState(0x78) & 0x8000)
+                if f9_down and not f9_was_down:
+                    self.cancel.set()
                     self.record_stop.set()
+                    self.play_stop.set()
+                    self.events.put(("stop", None))
+                if self.hotkeys_enabled.is_set():
+                    if f8_down and not f8_was_down:
+                        with self.key_lock:
+                            self.key_down = True
+                            self.record_stop.clear()
+                        self.events.put(("begin", None))
+                    elif not f8_down and f8_was_down:
+                        with self.key_lock:
+                            self.key_down = False
+                        self.record_stop.set()
+                elif self.key_down:
+                    with self.key_lock:
+                        self.key_down = False
+                    self.record_stop.set()
+                f8_was_down, f9_was_down = f8_down, f9_down
         try:
-            self.listener = keyboard.Listener(on_press=press, on_release=release)
-            self.listener.start()
+            self.hotkey_thread = threading.Thread(target=watch, daemon=True)
+            self.hotkey_thread.start()
         except Exception as error:
             self.write_log("SYSTEM", f"Hotkey unavailable: {error}. Use Start mic / Stop mic buttons.")
 
@@ -378,8 +390,7 @@ class Dispatch:
         self.closed = True
         self.stop()
         self.hotkeys_enabled.clear()
-        if self.listener:
-            self.listener.stop()
+        self.hotkey_stop.set()
         try:
             self.save_notes(False)
         except OSError:
