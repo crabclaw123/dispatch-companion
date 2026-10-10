@@ -31,6 +31,14 @@ SPEED_CHOICES = {
     "1.20×": "+20%",
     "1.30×": "+30%",
 }
+WINDOWS_SPEEDS = {
+    "0.85×": -2,
+    "0.95×": -1,
+    "1.00×": 0,
+    "1.10×": 1,
+    "1.20×": 2,
+    "1.30×": 3,
+}
 DEFAULT_SPEED = "1.00×"
 
 
@@ -87,8 +95,8 @@ def _speak_edge(text, device, cancel, voice_name, speed_name):
     play_wav(_mp3_to_wav(mp3), device, cancel)
 
 
-def _speak_windows(text, device, cancel):
-    # Text comes through stdin, file path through environment; no model-written
+def _speak_windows(text, device, cancel, speed_name=DEFAULT_SPEED):
+    # Text comes through stdin, file path/rate through environment; no model-written
     # text is interpreted as PowerShell code. The transient WAV is deleted.
     script = """$ErrorActionPreference = 'Stop'
 [Console]::InputEncoding = [System.Text.Encoding]::UTF8
@@ -96,6 +104,7 @@ $text = [Console]::In.ReadToEnd()
 Add-Type -AssemblyName System.Speech
 $voice = New-Object System.Speech.Synthesis.SpeechSynthesizer
 try {
+  $voice.Rate = [int]$env:DISPATCH_SPEECH_RATE
   $format = New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo -ArgumentList 24000, ([System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen), ([System.Speech.AudioFormat.AudioChannel]::Mono)
   $voice.SetOutputToWaveFile($env:DISPATCH_WAVE_PATH, $format)
   $voice.Speak($text)
@@ -104,7 +113,8 @@ try {
     encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
     with tempfile.TemporaryDirectory(prefix="dispatch-voice-") as directory:
         path = Path(directory) / "reply.wav"
-        env = dict(os.environ, DISPATCH_WAVE_PATH=str(path))
+        env = dict(os.environ, DISPATCH_WAVE_PATH=str(path),
+                   DISPATCH_SPEECH_RATE=str(WINDOWS_SPEEDS.get(speed_name, 0)))
         process = subprocess.Popen(["powershell.exe", "-NoProfile", "-NonInteractive",
                                     "-EncodedCommand", encoded], stdin=subprocess.PIPE,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -130,7 +140,7 @@ try {
 def speak(text, device, cancel, voice_name=DEFAULT_VOICE, speed_name=DEFAULT_SPEED):
     """Speak through the selected output. Edge voices automatically fall back to Windows."""
     if voice_name == WINDOWS_VOICE:
-        _speak_windows(text, device, cancel)
+        _speak_windows(text, device, cancel, speed_name)
         return "Windows"
     try:
         _speak_edge(text, device, cancel, voice_name, speed_name)
@@ -138,5 +148,5 @@ def speak(text, device, cancel, voice_name=DEFAULT_VOICE, speed_name=DEFAULT_SPE
     except Exception:
         if cancel.is_set():
             return "cancelled"
-        _speak_windows(text, device, cancel)
+        _speak_windows(text, device, cancel, speed_name)
         return "Windows fallback"
