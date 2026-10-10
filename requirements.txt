@@ -7,5 +7,7 @@ pynput>=1.7,<2
 python-dotenv>=1,<2
 PyJWT[crypto]>=2.8,<3
 faster-whisper>=1.1,<2
+edge-tts>=7,<8
+miniaudio>=1.60,<2
 # PyAV 19 removed metadata_errors while faster-whisper 1.x still passes it.
 av>=11,<19
