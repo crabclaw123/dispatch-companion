@@ -4,6 +4,7 @@ import base64
 import io
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import wave
@@ -40,6 +41,14 @@ WINDOWS_SPEEDS = {
     "1.30×": 3,
 }
 DEFAULT_SPEED = "1.00×"
+
+WHISPER_MODELS = {
+    "Tiny — fastest": "tiny.en",
+    "Base — balanced": "base.en",
+    "Small — more accurate": "small.en",
+}
+DEFAULT_WHISPER = "Base — balanced"
+
 ROOT = Path(__file__).resolve().parent
 VOICE_ERROR_LOG = ROOT / "local" / "voice-error.log"
 
@@ -47,18 +56,30 @@ VOICE_ERROR_LOG = ROOT / "local" / "voice-error.log"
 class LocalVoice:
     def __init__(self):
         self.model = None
+        self.model_id = None
 
-    def prepare(self):
+    def prepare(self, model_name=DEFAULT_WHISPER):
         from faster_whisper import WhisperModel
-        if self.model is None:
-            self.model = WhisperModel("base.en", device="cpu", compute_type="int8", cpu_threads=4)
+        model_id = WHISPER_MODELS.get(model_name, WHISPER_MODELS[DEFAULT_WHISPER])
+        if self.model is None or self.model_id != model_id:
+            self.model = WhisperModel(model_id, device="cpu", compute_type="int8", cpu_threads=4)
+            self.model_id = model_id
 
-    def transcribe(self, audio):
-        self.prepare()
+    def transcribe(self, audio, model_name=DEFAULT_WHISPER):
+        self.prepare(model_name)
         audio.seek(0)
         segments, _ = self.model.transcribe(audio, language="en", beam_size=1,
                                             vad_filter=True, condition_on_previous_text=False)
         return " ".join(segment.text.strip() for segment in segments).strip()
+
+
+def ready_sentences(buffer):
+    """Return completed speakable sentences plus any unfinished tail."""
+    parts = re.split(r"(?<=[.!?])\s+", buffer)
+    if len(parts) <= 1:
+        return [], buffer
+    complete = [part.strip() for part in parts[:-1] if part.strip()]
+    return complete, parts[-1]
 
 
 async def _edge_mp3_once(text: str, voice: str, rate: str, cancel) -> bytes:
