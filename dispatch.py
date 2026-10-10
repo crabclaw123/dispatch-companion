@@ -1,4 +1,4 @@
-"""DISPATCH v0.1 — hold F8, ask, release, listen."""
+"""DISPATCH v0.3 — hold F8, ask, release, listen."""
 import copy
 import os
 from pathlib import Path
@@ -19,11 +19,11 @@ from core import SYSTEM_PROMPT, load_state, save_state, build_input, append_turn
 from devices import enable_dpi_awareness, capture, record
 from plus_test import authenticate
 from plan_connection import PlanConnection
-from local_voice import LocalVoice, speak
+from local_voice import (LocalVoice, speak, VOICE_CHOICES, DEFAULT_VOICE,
+                         SPEED_CHOICES, DEFAULT_SPEED, WINDOWS_VOICE)
 
 ROOT = Path(__file__).resolve().parent
 STATE_PATH = ROOT / "local" / "state.json"
-
 
 
 class Dispatch:
@@ -54,8 +54,8 @@ class Dispatch:
 
     def _ui(self):
         self.root.title("DISPATCH · Resident Evil Companion")
-        self.root.geometry("780x850")
-        self.root.minsize(650, 680)
+        self.root.geometry("800x900")
+        self.root.minsize(650, 700)
         self.root.configure(bg="#101820")
         style = ttk.Style()
         style.theme_use("clam")
@@ -66,9 +66,9 @@ class Dispatch:
         frame.pack(fill="both", expand=True)
         ttk.Label(frame, text="📡 DISPATCH", font=("Segoe UI", 24, "bold")).pack(anchor="w")
         ttk.Label(frame, text="Hold F8 → wait for LISTENING → ask → release F8", font=("Segoe UI", 11)).pack(anchor="w", pady=(2, 12))
-        self.status = tk.StringVar(value="READY" if self.client else "SETUP · Add OPENAI_API_KEY to .env, then restart")
-        ttk.Label(frame, textvariable=self.status, font=("Segoe UI", 12, "bold"), wraplength=720).pack(anchor="w", pady=6)
-        ttk.Label(frame, text="Plus allowance · Local microphone transcription and Windows voice · No paid API fallback.", wraplength=720).pack(anchor="w")
+        self.status = tk.StringVar(value="READY")
+        ttk.Label(frame, textvariable=self.status, font=("Segoe UI", 12, "bold"), wraplength=740).pack(anchor="w", pady=6)
+        ttk.Label(frame, text="ChatGPT plan allowance · Local microphone transcription · Neural Edge voice with Windows fallback.", wraplength=740).pack(anchor="w")
 
         settings = ttk.Frame(frame)
         settings.pack(fill="x", pady=12)
@@ -91,20 +91,35 @@ class Dispatch:
         self.output_choice = tk.StringVar(value="System default")
         self._row(settings, "Microphone", ttk.Combobox(settings, textvariable=self.input_choice, values=list(inputs), state="readonly"), 2)
         self._row(settings, "Headphones / output", ttk.Combobox(settings, textvariable=self.output_choice, values=list(outputs), state="readonly"), 3)
+
+        saved_voice = self.state.get("voice_name", DEFAULT_VOICE)
+        if saved_voice not in VOICE_CHOICES:
+            saved_voice = DEFAULT_VOICE
+        saved_speed = self.state.get("voice_speed", DEFAULT_SPEED)
+        if saved_speed not in SPEED_CHOICES:
+            saved_speed = DEFAULT_SPEED
+        self.voice_choice = tk.StringVar(value=saved_voice)
+        self.speed_choice = tk.StringVar(value=saved_speed)
+        self._row(settings, "Dispatch voice", ttk.Combobox(settings, textvariable=self.voice_choice,
+                                                           values=VOICE_CHOICES, state="readonly"), 4)
+        self._row(settings, "Speech speed", ttk.Combobox(settings, textvariable=self.speed_choice,
+                                                         values=list(SPEED_CHOICES), state="readonly"), 5)
         settings.columnconfigure(1, weight=1)
 
         bar = ttk.Frame(frame)
         bar.pack(fill="x")
         self.capture_button = ttk.Button(bar, text="Test capture (no API)", command=self.test_capture)
         self.capture_button.pack(side="left")
+        self.voice_button = ttk.Button(bar, text="Test voice (no ChatGPT)", command=self.test_voice)
+        self.voice_button.pack(side="left", padx=8)
         self.talk_button = ttk.Button(bar, text="Start mic", command=self.toggle_mic)
-        self.talk_button.pack(side="left", padx=8)
-        ttk.Button(bar, text="Cancel / stop voice · F9", command=self.stop).pack(side="left")
+        self.talk_button.pack(side="left")
+        ttk.Button(bar, text="Cancel / stop voice · F9", command=self.stop).pack(side="left", padx=8)
 
         self.armed = tk.BooleanVar(value=False)
         ttk.Checkbutton(frame, text="Enable F8 hotkey (after checking the capture)", variable=self.armed,
                         command=self.arm).pack(anchor="w", pady=(8, 4))
-        ttk.Label(frame, text="Game capture reads the visible window area; keep RE2 unobstructed and use borderless mode.", wraplength=720).pack(anchor="w")
+        ttk.Label(frame, text="Game capture reads the visible window area; keep RE2 unobstructed and use borderless mode.", wraplength=740).pack(anchor="w")
 
         notebook = ttk.Notebook(frame)
         notebook.pack(fill="both", expand=True, pady=12)
@@ -147,7 +162,7 @@ class Dispatch:
         ttk.Button(note_bar, text="Save confirmed notes", command=self.save_notes).pack(side="left")
         self.clear_button = ttk.Button(note_bar, text="Clear radio history", command=self.clear_history)
         self.clear_button.pack(side="left", padx=8)
-        ttk.Label(frame, text="v0.2 · ChatGPT plan · One frame per question · F9 cancels · Max mic recording: 30 seconds").pack(anchor="w")
+        ttk.Label(frame, text="v0.3 · ChatGPT plan · Neural voice + fallback · F9 cancels · Max mic recording: 30 seconds").pack(anchor="w")
         for item in self.state["history"]:
             self.write_log("YOU" if item["role"] == "user" else "DISPATCH", item["content"])
 
@@ -211,9 +226,11 @@ class Dispatch:
             self.state[key] = variable.get().strip()
         self.state["confirmed_notes"] = self.notes.get("1.0", "end").strip()
         self.state["player_profile"] = self.profile.get("1.0", "end").strip()
+        self.state["voice_name"] = self.voice_choice.get()
+        self.state["voice_speed"] = self.speed_choice.get()
         save_state(STATE_PATH, self.state)
         if announce:
-            self.write_log("SYSTEM", "Confirmed notes saved locally.")
+            self.write_log("SYSTEM", "Confirmed notes and voice settings saved locally.")
 
     def clear_history(self):
         if self.busy:
@@ -229,13 +246,14 @@ class Dispatch:
         if self.capture_mode.get() == "Game window" and not fragment:
             raise ValueError("Enter part of the game window's title.")
         return (self.capture_mode.get(), fragment, self.input_devices[self.input_choice.get()],
-                self.output_devices[self.output_choice.get()])
+                self.output_devices[self.output_choice.get()], self.voice_choice.get(),
+                self.speed_choice.get())
 
     def _start(self, target, needs_api=True):
         if self.busy:
             return
         if needs_api and not self.client:
-            self.write_log("SYSTEM", "Add OPENAI_API_KEY in .env and restart. Capture testing needs no key.")
+            self.write_log("SYSTEM", "ChatGPT is not connected. Restart Dispatch and sign in again.")
             return
         try:
             self.save_notes(False)
@@ -246,9 +264,9 @@ class Dispatch:
         self.busy = True
         self.cancel.clear()
         self.play_stop.clear()
-        for button in (self.capture_button, self.send_button, self.clear_button):
+        for button in (self.capture_button, self.voice_button, self.send_button, self.clear_button):
             button.configure(state="disabled")
-        self.status.set("CAPTURING")
+        self.status.set("WORKING")
         threading.Thread(target=self._guard, args=(target, options, snapshot), daemon=True).start()
 
     def _guard(self, target, options, state):
@@ -271,8 +289,19 @@ class Dispatch:
 
     def test_capture(self):
         def work(options, state):
+            self.events.put(("status", "CAPTURING"))
             image, _, source = capture(options[0], options[1])
             self.events.put(("preview", (image, source)))
+        self._start(work, False)
+
+    def test_voice(self):
+        def work(options, state):
+            voice_name, speed_name = options[4], options[5]
+            self.events.put(("status", f"VOICE TEST · {voice_name} · {speed_name}"))
+            engine = speak("Dispatch online. Kennedy, radio check. How does this voice sound?",
+                           options[3], self.play_stop, voice_name, speed_name)
+            if engine == "Windows fallback" and not self.cancel.is_set():
+                self.events.put(("system", "Edge voice was unavailable, so the voice test used Windows fallback."))
         self._start(work, False)
 
     def begin_voice(self):
@@ -287,7 +316,7 @@ class Dispatch:
             question = self.voice.transcribe(audio)
             if not question:
                 raise RuntimeError("No speech recognized. Try again with your headset mic.")
-            self.respond(question, url, source, options[3], state)
+            self.respond(question, url, source, options[3], options[4], options[5], state)
         self._start(work)
         if self.busy:
             self.talk_button.configure(text="Stop mic")
@@ -305,12 +334,12 @@ class Dispatch:
             return
         def work(options, state):
             _, url, source = capture(options[0], options[1])
-            self.respond(question, url, source, options[3], state)
+            self.respond(question, url, source, options[3], options[4], options[5], state)
         self._start(work)
         if self.busy:
             self.question.set("")
 
-    def respond(self, question, url, source, output_device, state):
+    def respond(self, question, url, source, output_device, voice_name, speed_name, state):
         if self.cancel.is_set():
             return
         self.events.put(("question", question))
@@ -323,11 +352,12 @@ class Dispatch:
         if not answer:
             raise RuntimeError("Model returned no answer. Try again or check the configured vision model.")
         self.events.put(("answer", (question, answer)))
-        self.events.put(("status", "GENERATING VOICE"))
+        self.events.put(("status", f"RESPONDING · {voice_name}"))
         if self.cancel.is_set():
             return
-        self.events.put(("status", "RESPONDING · Windows voice"))
-        speak(answer, output_device, self.play_stop)
+        engine = speak(answer, output_device, self.play_stop, voice_name, speed_name)
+        if engine == "Windows fallback" and not self.cancel.is_set():
+            self.events.put(("system", "Edge voice was unavailable; Dispatch used Windows voice for this reply."))
 
     def stop(self):
         self.cancel.set()
@@ -372,6 +402,8 @@ class Dispatch:
                         save_state(STATE_PATH, self.state)
                     except OSError as error:
                         self.write_log("SYSTEM", f"Reply received, but local history could not save: {error}")
+                elif kind == "system":
+                    self.write_log("SYSTEM", value)
                 elif kind == "error":
                     self.write_log("SYSTEM", value)
                 elif kind == "preview":
@@ -379,9 +411,9 @@ class Dispatch:
                 elif kind == "done":
                     self.busy = False
                     self.talk_button.configure(text="Start mic")
-                    for button in (self.capture_button, self.send_button, self.clear_button):
+                    for button in (self.capture_button, self.voice_button, self.send_button, self.clear_button):
                         button.configure(state="normal")
-                    self.status.set("READY" if self.client else "SETUP · API key needed for questions")
+                    self.status.set("READY" if self.client else "SETUP · ChatGPT sign-in required")
         except queue.Empty:
             pass
         self.root.after(40, self._poll)
