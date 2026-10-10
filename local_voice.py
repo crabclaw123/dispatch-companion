@@ -40,6 +40,8 @@ WINDOWS_SPEEDS = {
     "1.30×": 3,
 }
 DEFAULT_SPEED = "1.00×"
+ROOT = Path(__file__).resolve().parent
+VOICE_ERROR_LOG = ROOT / "local" / "voice-error.log"
 
 
 class LocalVoice:
@@ -59,7 +61,7 @@ class LocalVoice:
         return " ".join(segment.text.strip() for segment in segments).strip()
 
 
-async def _edge_mp3(text: str, voice: str, rate: str, cancel) -> bytes:
+async def _edge_mp3_once(text: str, voice: str, rate: str, cancel) -> bytes:
     import edge_tts
 
     chunks = []
@@ -72,16 +74,35 @@ async def _edge_mp3(text: str, voice: str, rate: str, cancel) -> bytes:
     return b"".join(chunks)
 
 
+async def _edge_mp3(text: str, voice: str, rate: str, cancel) -> bytes:
+    """Retry brief/transient Edge failures before giving up to Windows speech."""
+    last_error = None
+    for attempt in range(3):
+        if cancel.is_set():
+            return b""
+        try:
+            content = await _edge_mp3_once(text, voice, rate, cancel)
+            if content:
+                return content
+            if not cancel.is_set():
+                last_error = RuntimeError("Edge TTS returned no audio")
+        except Exception as error:
+            last_error = error
+        if attempt < 2 and not cancel.is_set():
+            await asyncio.sleep(0.4 * (attempt + 1))
+    if last_error:
+        raise last_error
+    return b""
+
+
 def _mp3_to_wav(content: bytes) -> bytes:
-    """Decode Edge's MP3 to the mono 24 kHz PCM WAV our existing player expects."""
+    """Decode Edge's MP3 to mono 24 kHz PCM WAV for our existing player."""
     import miniaudio
 
     decoded = miniaudio.decode(content, output_format=miniaudio.SampleFormat.SIGNED16,
                                nchannels=1, sample_rate=24000)
     buffer = io.BytesIO()
     with wave.open(buffer, "wb") as wav:
-        # We request these exact output properties above instead of trusting
-        # decoder metadata that can differ between miniaudio releases.
         wav.setnchannels(1)
         wav.setsampwidth(2)
         wav.setframerate(24000)
@@ -142,21 +163,28 @@ try {
                 process.wait(timeout=5)
 
 
-def speak(text, device, cancel, voice_name=DEFAULT_VOICE, speed_name=DEFAULT_SPEED):
-    """Speak through the selected output and report the engine actually used.
+def _record_fallback_reason(voice_name, error):
+    """Keep the real Edge error available instead of silently hiding it."""
+    try:
+        VOICE_ERROR_LOG.parent.mkdir(parents=True, exist_ok=True)
+        message = f"{voice_name}: {type(error).__name__}: {error}"
+        VOICE_ERROR_LOG.write_text(message + "\n", encoding="utf-8")
+        print("DISPATCH Edge voice fallback:", message)
+    except OSError:
+        pass
 
-    Returns (engine_name, fallback_reason). fallback_reason is None when Edge
-    succeeds or Windows was explicitly selected.
-    """
+
+def speak(text, device, cancel, voice_name=DEFAULT_VOICE, speed_name=DEFAULT_SPEED):
+    """Speak through the selected output. Edge voices automatically fall back to Windows."""
     if voice_name == WINDOWS_VOICE:
         _speak_windows(text, device, cancel, speed_name)
-        return "Windows", None
+        return "Windows"
     try:
         _speak_edge(text, device, cancel, voice_name, speed_name)
-        return "Edge", None
+        return "Edge"
     except Exception as error:
         if cancel.is_set():
-            return "cancelled", None
-        reason = f"{type(error).__name__}: {error}"
+            return "cancelled"
+        _record_fallback_reason(voice_name, error)
         _speak_windows(text, device, cancel, speed_name)
-        return "Windows fallback", reason
+        return "Windows fallback"
