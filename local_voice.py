@@ -1,11 +1,37 @@
-"""CPU Whisper transcription and Windows speech: no remote voice API."""
+"""Local Whisper transcription plus neural/Windows speech playback."""
+import asyncio
 import base64
+import io
 import os
 from pathlib import Path
 import subprocess
 import tempfile
+import wave
 
 from devices import play_wav
+
+
+EDGE_VOICES = {
+    "Guy — natural male": "en-US-GuyNeural",
+    "Christopher — warm male": "en-US-ChristopherNeural",
+    "Eric — clear male": "en-US-EricNeural",
+    "Andrew — conversational male": "en-US-AndrewNeural",
+    "Jenny — natural female": "en-US-JennyNeural",
+    "Aria — conversational female": "en-US-AriaNeural",
+}
+WINDOWS_VOICE = "Windows Default — offline fallback"
+VOICE_CHOICES = list(EDGE_VOICES) + [WINDOWS_VOICE]
+DEFAULT_VOICE = "Guy — natural male"
+
+SPEED_CHOICES = {
+    "0.85×": "-15%",
+    "0.95×": "-5%",
+    "1.00×": "+0%",
+    "1.10×": "+10%",
+    "1.20×": "+20%",
+    "1.30×": "+30%",
+}
+DEFAULT_SPEED = "1.00×"
 
 
 class LocalVoice:
@@ -25,7 +51,43 @@ class LocalVoice:
         return " ".join(segment.text.strip() for segment in segments).strip()
 
 
-def speak(text, device, cancel):
+async def _edge_mp3(text: str, voice: str, rate: str, cancel) -> bytes:
+    import edge_tts
+
+    chunks = []
+    communicate = edge_tts.Communicate(text, voice, rate=rate)
+    async for chunk in communicate.stream():
+        if cancel.is_set():
+            return b""
+        if chunk["type"] == "audio":
+            chunks.append(chunk["data"])
+    return b"".join(chunks)
+
+
+def _mp3_to_wav(content: bytes) -> bytes:
+    import miniaudio
+
+    decoded = miniaudio.decode(content, output_format=miniaudio.SampleFormat.SIGNED16,
+                               nchannels=1, sample_rate=24000)
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(decoded.nchannels)
+        wav.setsampwidth(decoded.sample_width)
+        wav.setframerate(decoded.sample_rate)
+        wav.writeframes(decoded.samples.tobytes())
+    return buffer.getvalue()
+
+
+def _speak_edge(text, device, cancel, voice_name, speed_name):
+    voice = EDGE_VOICES.get(voice_name, EDGE_VOICES[DEFAULT_VOICE])
+    rate = SPEED_CHOICES.get(speed_name, SPEED_CHOICES[DEFAULT_SPEED])
+    mp3 = asyncio.run(_edge_mp3(text, voice, rate, cancel))
+    if cancel.is_set() or not mp3:
+        return
+    play_wav(_mp3_to_wav(mp3), device, cancel)
+
+
+def _speak_windows(text, device, cancel):
     # Text comes through stdin, file path through environment; no model-written
     # text is interpreted as PowerShell code. The transient WAV is deleted.
     script = """$ErrorActionPreference = 'Stop'
@@ -63,3 +125,18 @@ try {
             if process.poll() is None:
                 process.terminate()
                 process.wait(timeout=5)
+
+
+def speak(text, device, cancel, voice_name=DEFAULT_VOICE, speed_name=DEFAULT_SPEED):
+    """Speak through the selected output. Edge voices automatically fall back to Windows."""
+    if voice_name == WINDOWS_VOICE:
+        _speak_windows(text, device, cancel)
+        return "Windows"
+    try:
+        _speak_edge(text, device, cancel, voice_name, speed_name)
+        return "Edge"
+    except Exception:
+        if cancel.is_set():
+            return "cancelled"
+        _speak_windows(text, device, cancel)
+        return "Windows fallback"
