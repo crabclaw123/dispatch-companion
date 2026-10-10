@@ -73,15 +73,18 @@ async def _edge_mp3(text: str, voice: str, rate: str, cancel) -> bytes:
 
 
 def _mp3_to_wav(content: bytes) -> bytes:
+    """Decode Edge's MP3 to the mono 24 kHz PCM WAV our existing player expects."""
     import miniaudio
 
     decoded = miniaudio.decode(content, output_format=miniaudio.SampleFormat.SIGNED16,
                                nchannels=1, sample_rate=24000)
     buffer = io.BytesIO()
     with wave.open(buffer, "wb") as wav:
-        wav.setnchannels(decoded.nchannels)
-        wav.setsampwidth(decoded.sample_width)
-        wav.setframerate(decoded.sample_rate)
+        # We request these exact output properties above instead of trusting
+        # decoder metadata that can differ between miniaudio releases.
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(24000)
         wav.writeframes(decoded.samples.tobytes())
     return buffer.getvalue()
 
@@ -90,8 +93,10 @@ def _speak_edge(text, device, cancel, voice_name, speed_name):
     voice = EDGE_VOICES.get(voice_name, EDGE_VOICES[DEFAULT_VOICE])
     rate = SPEED_CHOICES.get(speed_name, SPEED_CHOICES[DEFAULT_SPEED])
     mp3 = asyncio.run(_edge_mp3(text, voice, rate, cancel))
-    if cancel.is_set() or not mp3:
+    if cancel.is_set():
         return
+    if not mp3:
+        raise RuntimeError("Edge TTS returned no audio")
     play_wav(_mp3_to_wav(mp3), device, cancel)
 
 
@@ -138,15 +143,20 @@ try {
 
 
 def speak(text, device, cancel, voice_name=DEFAULT_VOICE, speed_name=DEFAULT_SPEED):
-    """Speak through the selected output. Edge voices automatically fall back to Windows."""
+    """Speak through the selected output and report the engine actually used.
+
+    Returns (engine_name, fallback_reason). fallback_reason is None when Edge
+    succeeds or Windows was explicitly selected.
+    """
     if voice_name == WINDOWS_VOICE:
         _speak_windows(text, device, cancel, speed_name)
-        return "Windows"
+        return "Windows", None
     try:
         _speak_edge(text, device, cancel, voice_name, speed_name)
-        return "Edge"
-    except Exception:
+        return "Edge", None
+    except Exception as error:
         if cancel.is_set():
-            return "cancelled"
+            return "cancelled", None
+        reason = f"{type(error).__name__}: {error}"
         _speak_windows(text, device, cancel, speed_name)
-        return "Windows fallback"
+        return "Windows fallback", reason
