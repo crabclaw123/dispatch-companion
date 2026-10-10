@@ -1,4 +1,4 @@
-"""DISPATCH v0.3 — hold F8, ask, release, listen."""
+"""DISPATCH v0.4 — hold F8, ask, release, listen."""
 import copy
 import os
 from pathlib import Path
@@ -19,11 +19,13 @@ from core import SYSTEM_PROMPT, load_state, save_state, build_input, append_turn
 from devices import enable_dpi_awareness, capture, record
 from plus_test import authenticate
 from plan_connection import PlanConnection
-from local_voice import (LocalVoice, speak, VOICE_CHOICES, DEFAULT_VOICE,
-                         SPEED_CHOICES, DEFAULT_SPEED, WINDOWS_VOICE)
+from local_voice import (LocalVoice, speak, ready_sentences, VOICE_CHOICES, DEFAULT_VOICE,
+                         SPEED_CHOICES, DEFAULT_SPEED, WINDOWS_VOICE,
+                         WHISPER_MODELS, DEFAULT_WHISPER)
 
 ROOT = Path(__file__).resolve().parent
 STATE_PATH = ROOT / "local" / "state.json"
+PERF_LOG_PATH = ROOT / "local" / "performance.log"
 
 
 class Dispatch:
@@ -47,15 +49,15 @@ class Dispatch:
         self.voice = LocalVoice()
         self._ui()
         self._hotkeys()
-        self._start(lambda options, state: self.voice.prepare(), False)
-        self.status.set("PREPARING LOCAL VOICE · first launch downloads the speech model")
+        self._start(lambda options, state: self.voice.prepare(options[6]), False)
+        self.status.set("PREPARING LOCAL VOICE · first use of a Whisper model may download it")
         self.root.after(40, self._poll)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
 
     def _ui(self):
         self.root.title("DISPATCH · Resident Evil Companion")
-        self.root.geometry("800x900")
-        self.root.minsize(650, 700)
+        self.root.geometry("820x930")
+        self.root.minsize(670, 720)
         self.root.configure(bg="#101820")
         style = ttk.Style()
         style.theme_use("clam")
@@ -67,8 +69,8 @@ class Dispatch:
         ttk.Label(frame, text="📡 DISPATCH", font=("Segoe UI", 24, "bold")).pack(anchor="w")
         ttk.Label(frame, text="Hold F8 → wait for LISTENING → ask → release F8", font=("Segoe UI", 11)).pack(anchor="w", pady=(2, 12))
         self.status = tk.StringVar(value="READY")
-        ttk.Label(frame, textvariable=self.status, font=("Segoe UI", 12, "bold"), wraplength=740).pack(anchor="w", pady=6)
-        ttk.Label(frame, text="ChatGPT plan allowance · Local microphone transcription · Neural Edge voice with Windows fallback.", wraplength=740).pack(anchor="w")
+        ttk.Label(frame, textvariable=self.status, font=("Segoe UI", 12, "bold"), wraplength=760).pack(anchor="w", pady=6)
+        ttk.Label(frame, text="ChatGPT plan allowance · Local selectable Whisper · Streaming neural voice with Windows fallback.", wraplength=760).pack(anchor="w")
 
         settings = ttk.Frame(frame)
         settings.pack(fill="x", pady=12)
@@ -98,12 +100,18 @@ class Dispatch:
         saved_speed = self.state.get("voice_speed", DEFAULT_SPEED)
         if saved_speed not in SPEED_CHOICES:
             saved_speed = DEFAULT_SPEED
+        saved_whisper = self.state.get("whisper_model", DEFAULT_WHISPER)
+        if saved_whisper not in WHISPER_MODELS:
+            saved_whisper = DEFAULT_WHISPER
         self.voice_choice = tk.StringVar(value=saved_voice)
         self.speed_choice = tk.StringVar(value=saved_speed)
+        self.whisper_choice = tk.StringVar(value=saved_whisper)
         self._row(settings, "Dispatch voice", ttk.Combobox(settings, textvariable=self.voice_choice,
                                                            values=VOICE_CHOICES, state="readonly"), 4)
         self._row(settings, "Speech speed", ttk.Combobox(settings, textvariable=self.speed_choice,
                                                          values=list(SPEED_CHOICES), state="readonly"), 5)
+        self._row(settings, "Whisper model", ttk.Combobox(settings, textvariable=self.whisper_choice,
+                                                          values=list(WHISPER_MODELS), state="readonly"), 6)
         settings.columnconfigure(1, weight=1)
 
         bar = ttk.Frame(frame)
@@ -119,7 +127,7 @@ class Dispatch:
         self.armed = tk.BooleanVar(value=False)
         ttk.Checkbutton(frame, text="Enable F8 hotkey (after checking the capture)", variable=self.armed,
                         command=self.arm).pack(anchor="w", pady=(8, 4))
-        ttk.Label(frame, text="Game capture reads the visible window area; keep RE2 unobstructed and use borderless mode.", wraplength=740).pack(anchor="w")
+        ttk.Label(frame, text="Tiny Whisper is fastest; Base is the default balance; Small favors transcription accuracy.", wraplength=760).pack(anchor="w")
 
         notebook = ttk.Notebook(frame)
         notebook.pack(fill="both", expand=True, pady=12)
@@ -162,7 +170,7 @@ class Dispatch:
         ttk.Button(note_bar, text="Save confirmed notes", command=self.save_notes).pack(side="left")
         self.clear_button = ttk.Button(note_bar, text="Clear radio history", command=self.clear_history)
         self.clear_button.pack(side="left", padx=8)
-        ttk.Label(frame, text="v0.3 · ChatGPT plan · Neural voice + fallback · F9 cancels · Max mic recording: 30 seconds").pack(anchor="w")
+        ttk.Label(frame, text="v0.4 · Streaming speech · Latency telemetry · F9 cancels · Max mic recording: 30 seconds").pack(anchor="w")
         for item in self.state["history"]:
             self.write_log("YOU" if item["role"] == "user" else "DISPATCH", item["content"])
 
@@ -172,9 +180,6 @@ class Dispatch:
         widget.grid(row=row, column=1, sticky="ew", pady=3)
 
     def _hotkeys(self):
-        # Poll Windows directly. Some games consume keyboard events before a
-        # pynput hook sees them, while GetAsyncKeyState still reflects the
-        # physical key even when the game owns focus.
         def watch():
             user32 = __import__("ctypes").windll.user32
             f8_was_down = False
@@ -228,9 +233,10 @@ class Dispatch:
         self.state["player_profile"] = self.profile.get("1.0", "end").strip()
         self.state["voice_name"] = self.voice_choice.get()
         self.state["voice_speed"] = self.speed_choice.get()
+        self.state["whisper_model"] = self.whisper_choice.get()
         save_state(STATE_PATH, self.state)
         if announce:
-            self.write_log("SYSTEM", "Confirmed notes and voice settings saved locally.")
+            self.write_log("SYSTEM", "Confirmed notes and voice/speed settings saved locally.")
 
     def clear_history(self):
         if self.busy:
@@ -247,7 +253,7 @@ class Dispatch:
             raise ValueError("Enter part of the game window's title.")
         return (self.capture_mode.get(), fragment, self.input_devices[self.input_choice.get()],
                 self.output_devices[self.output_choice.get()], self.voice_choice.get(),
-                self.speed_choice.get())
+                self.speed_choice.get(), self.whisper_choice.get())
 
     def _start(self, target, needs_api=True):
         if self.busy:
@@ -279,7 +285,6 @@ class Dispatch:
         except APIConnectionError:
             self.events.put(("error", "Could not reach OpenAI. Check your internet connection."))
         except Exception as error:
-            # Avoid printing API request bodies, keys, screenshots or raw server errors.
             from openai import APIStatusError
             detail = f"OpenAI returned HTTP {error.status_code}. Check ChatGPT model access and plan allowance." if isinstance(error, APIStatusError) else str(error)
             if not self.cancel.is_set():
@@ -306,17 +311,24 @@ class Dispatch:
 
     def begin_voice(self):
         def work(options, state):
+            timings = {}
+            started = time.perf_counter()
+            capture_started = time.perf_counter()
             image, url, source = capture(options[0], options[1])
+            timings["capture"] = time.perf_counter() - capture_started
             if self.cancel.is_set():
                 return
             audio = record(self.record_stop, options[2], lambda: self.events.put(("status", "LISTENING · release F8 / click Stop mic to send")))
             if self.cancel.is_set():
                 return
-            self.events.put(("status", "TRANSCRIBING"))
-            question = self.voice.transcribe(audio)
+            self.events.put(("status", f"TRANSCRIBING · {options[6]}"))
+            transcribe_started = time.perf_counter()
+            question = self.voice.transcribe(audio, options[6])
+            timings["transcribe"] = time.perf_counter() - transcribe_started
             if not question:
                 raise RuntimeError("No speech recognized. Try again with your headset mic.")
-            self.respond(question, url, source, options[3], options[4], options[5], state)
+            timings["pre_model"] = time.perf_counter() - started
+            self.respond(question, url, source, options[3], options[4], options[5], state, timings)
         self._start(work)
         if self.busy:
             self.talk_button.configure(text="Stop mic")
@@ -333,31 +345,106 @@ class Dispatch:
         if not question or self.busy:
             return
         def work(options, state):
+            timings = {}
+            capture_started = time.perf_counter()
             _, url, source = capture(options[0], options[1])
-            self.respond(question, url, source, options[3], options[4], options[5], state)
+            timings["capture"] = time.perf_counter() - capture_started
+            self.respond(question, url, source, options[3], options[4], options[5], state, timings)
         self._start(work)
         if self.busy:
             self.question.set("")
 
-    def respond(self, question, url, source, output_device, voice_name, speed_name, state):
+    def respond(self, question, url, source, output_device, voice_name, speed_name, state, timings=None):
         if self.cancel.is_set():
             return
+        timings = timings or {}
         self.events.put(("question", question))
-        self.events.put(("status", "ANALYZING"))
+        self.events.put(("status", "ANALYZING · speech will begin after first complete sentence"))
         profile = state.get("player_profile", "")
-        answer = self.client.answer(SYSTEM_PROMPT + "\nPlayer profile (not game progress):\n" + profile,
-                                    build_input(state, question, url, source), self.cancel)
+
+        speech_queue = queue.Queue()
+        speech_stats = {}
+        fallback_used = threading.Event()
+
+        def speech_worker():
+            speech_started = None
+            while not self.cancel.is_set():
+                sentence = speech_queue.get()
+                if sentence is None:
+                    break
+                if self.cancel.is_set():
+                    break
+                if speech_started is None:
+                    speech_started = time.perf_counter()
+                    speech_stats["first_speech_start"] = speech_started
+                    self.events.put(("status", f"RESPONDING · {voice_name} · streaming"))
+                engine = speak(sentence, output_device, self.play_stop, voice_name, speed_name)
+                if engine == "Windows fallback":
+                    fallback_used.set()
+            if speech_started is not None:
+                speech_stats["speech_total"] = time.perf_counter() - speech_started
+
+        speaker = threading.Thread(target=speech_worker, daemon=True)
+        speaker.start()
+
+        stream_buffer = ""
+        model_started = time.perf_counter()
+
+        def on_delta(delta):
+            nonlocal stream_buffer
+            now = time.perf_counter()
+            if "model_first_token" not in timings:
+                timings["model_first_token"] = now - model_started
+            stream_buffer += delta
+            sentences, stream_buffer = ready_sentences(stream_buffer)
+            if sentences and "first_sentence" not in timings:
+                timings["first_sentence"] = now - model_started
+            for sentence in sentences:
+                speech_queue.put(sentence)
+
+        try:
+            answer = self.client.answer(SYSTEM_PROMPT + "\nPlayer profile (not game progress):\n" + profile,
+                                        build_input(state, question, url, source), self.cancel,
+                                        on_delta=on_delta)
+            timings["model_total"] = time.perf_counter() - model_started
+            if self.cancel.is_set():
+                return
+            if not answer:
+                raise RuntimeError("Model returned no answer. Try again or check the configured vision model.")
+            if stream_buffer.strip():
+                if "first_sentence" not in timings:
+                    timings["first_sentence"] = timings["model_total"]
+                speech_queue.put(stream_buffer.strip())
+            self.events.put(("answer", (question, answer)))
+        finally:
+            speech_queue.put(None)
+            speaker.join()
+
         if self.cancel.is_set():
             return
-        if not answer:
-            raise RuntimeError("Model returned no answer. Try again or check the configured vision model.")
-        self.events.put(("answer", (question, answer)))
-        self.events.put(("status", f"RESPONDING · {voice_name}"))
-        if self.cancel.is_set():
-            return
-        engine = speak(answer, output_device, self.play_stop, voice_name, speed_name)
-        if engine == "Windows fallback" and not self.cancel.is_set():
-            self.events.put(("system", "Edge voice was unavailable; Dispatch used Windows voice for this reply."))
+        timings.update(speech_stats)
+        if fallback_used.is_set():
+            self.events.put(("system", "Edge voice was unavailable during streaming; Dispatch used Windows voice for one or more sentences."))
+        self._report_timings(timings)
+
+    def _report_timings(self, timings):
+        parts = []
+        labels = (("capture", "capture"), ("transcribe", "transcribe"),
+                  ("model_first_token", "first token"), ("first_sentence", "first sentence"),
+                  ("model_total", "model total"), ("speech_total", "speech playback"))
+        for key, label in labels:
+            if key in timings:
+                parts.append(f"{label} {timings[key]:.2f}s")
+        if "first_speech_start" in timings:
+            parts.append(f"speech start {timings['first_speech_start']:.2f}s")
+        message = "LATENCY · " + " · ".join(parts)
+        self.events.put(("system", message))
+        try:
+            PERF_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with PERF_LOG_PATH.open("a", encoding="utf-8") as handle:
+                handle.write(time.strftime("%Y-%m-%d %H:%M:%S") + " " + message + "\n")
+        except OSError:
+            pass
 
     def stop(self):
         self.cancel.set()
