@@ -9,7 +9,7 @@ class PlanConnection:
         self.tokens = dict(tokens)
         self.model = model
 
-    def answer(self, instructions, messages, cancel):
+    def answer(self, instructions, messages, cancel, on_delta=None):
         if time.time() >= self.tokens["expires_at"] - 90:
             old = self.tokens
             if not old.get("refresh_token"):
@@ -35,6 +35,8 @@ class PlanConnection:
                         return ""
                     if event.type == "response.output_text.delta":
                         pieces.append(event.delta)
+                        if on_delta:
+                            on_delta(event.delta)
                     elif event.type in ("response.failed", "response.incomplete", "error"):
                         raise RuntimeError("ChatGPT plan request failed. Check your plan allowance/app permission. No paid fallback is enabled.")
                     elif event.type == "response.completed":
