@@ -39,6 +39,16 @@ class PlanTests(unittest.TestCase):
         client.audio.speech.create.assert_not_called()
         client.close.assert_called_once()
 
+    def test_delta_callback_receives_text_without_changing_final_answer(self):
+        connection, _, _, _ = self.setup_connection([
+            SimpleNamespace(type="response.output_text.delta", delta="First sentence. "),
+            SimpleNamespace(type="response.output_text.delta", delta="Second sentence."),
+            SimpleNamespace(type="response.completed")])
+        deltas = []
+        answer = connection.answer("prompt", [], threading.Event(), on_delta=deltas.append)
+        self.assertEqual(deltas, ["First sentence. ", "Second sentence."])
+        self.assertEqual(answer, "First sentence. Second sentence.")
+
     def test_failed_or_interrupted_stream_never_returns_partial_answer(self):
         for ending in [[], [SimpleNamespace(type="response.failed")]]:
             connection, client, _, _ = self.setup_connection([
