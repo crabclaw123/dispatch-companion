@@ -206,7 +206,7 @@ class Dispatch:
                     with self.key_lock:
                         self.key_down = False
                     self.record_stop.set()
-                f8_was_down, f9_was_down = f8_down, f9_down
+                f8_was_down, f9_was_down = f8_down, f9_was_down if False else f9_down
         try:
             self.hotkey_thread = threading.Thread(target=watch, daemon=True)
             self.hotkey_thread.start()
@@ -365,6 +365,7 @@ class Dispatch:
         speech_queue = queue.Queue()
         speech_stats = {}
         fallback_used = threading.Event()
+        model_started = time.perf_counter()
 
         def speech_worker():
             speech_started = None
@@ -376,7 +377,7 @@ class Dispatch:
                     break
                 if speech_started is None:
                     speech_started = time.perf_counter()
-                    speech_stats["first_speech_start"] = speech_started
+                    speech_stats["speech_start"] = speech_started - model_started
                     self.events.put(("status", f"RESPONDING · {voice_name} · streaming"))
                 engine = speak(sentence, output_device, self.play_stop, voice_name, speed_name)
                 if engine == "Windows fallback":
@@ -386,9 +387,7 @@ class Dispatch:
 
         speaker = threading.Thread(target=speech_worker, daemon=True)
         speaker.start()
-
         stream_buffer = ""
-        model_started = time.perf_counter()
 
         def on_delta(delta):
             nonlocal stream_buffer
@@ -416,6 +415,9 @@ class Dispatch:
                     timings["first_sentence"] = timings["model_total"]
                 speech_queue.put(stream_buffer.strip())
             self.events.put(("answer", (question, answer)))
+        except Exception:
+            self.play_stop.set()
+            raise
         finally:
             speech_queue.put(None)
             speaker.join()
@@ -431,12 +433,11 @@ class Dispatch:
         parts = []
         labels = (("capture", "capture"), ("transcribe", "transcribe"),
                   ("model_first_token", "first token"), ("first_sentence", "first sentence"),
-                  ("model_total", "model total"), ("speech_total", "speech playback"))
+                  ("speech_start", "speech start"), ("model_total", "model total"),
+                  ("speech_total", "speech playback"))
         for key, label in labels:
             if key in timings:
                 parts.append(f"{label} {timings[key]:.2f}s")
-        if "first_speech_start" in timings:
-            parts.append(f"speech start {timings['first_speech_start']:.2f}s")
         message = "LATENCY · " + " · ".join(parts)
         self.events.put(("system", message))
         try:
