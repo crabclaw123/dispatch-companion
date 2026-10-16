@@ -1,4 +1,4 @@
-"""DISPATCH v0.4 — hold F8, ask, release, listen."""
+"""DISPATCH v0.5 — hold F8, ask, release, listen."""
 import copy
 import os
 from pathlib import Path
@@ -9,13 +9,15 @@ import time
 import tkinter as tk
 from tkinter import ttk, messagebox
 from tkinter.scrolledtext import ScrolledText
+import webbrowser
 
 from openai import AuthenticationError, RateLimitError, APIConnectionError
 from PIL import ImageTk
 import mss
 import sounddevice as sd
 
-from core import SYSTEM_PROMPT, load_state, save_state, build_input, append_turn
+from core import (SYSTEM_PROMPT, load_state, save_state, build_input, append_turn,
+                  requests_web_lookup)
 from devices import enable_dpi_awareness, capture, record
 from plus_test import authenticate
 from plan_connection import PlanConnection
@@ -26,6 +28,8 @@ from local_voice import (LocalVoice, speak, ready_sentences, VOICE_CHOICES, DEFA
 ROOT = Path(__file__).resolve().parent
 STATE_PATH = ROOT / "local" / "state.json"
 PERF_LOG_PATH = ROOT / "local" / "performance.log"
+WEB_MODES = ("Auto", "Asked only", "Off")
+DEFAULT_WEB_MODE = "Auto"
 
 
 class Dispatch:
@@ -44,6 +48,7 @@ class Dispatch:
         self.photo = None
         self.preview_window = None
         self.hotkeys_enabled = threading.Event()
+        self.link_counter = 0
         self.state = load_state(STATE_PATH)
         self.client = connection
         self.voice = LocalVoice()
@@ -56,7 +61,7 @@ class Dispatch:
 
     def _ui(self):
         self.root.title("DISPATCH · Resident Evil Companion")
-        self.root.geometry("820x930")
+        self.root.geometry("820x950")
         self.root.minsize(670, 720)
         self.root.configure(bg="#101820")
         style = ttk.Style()
@@ -70,7 +75,7 @@ class Dispatch:
         ttk.Label(frame, text="Hold F8 → wait for LISTENING → ask → release F8", font=("Segoe UI", 11)).pack(anchor="w", pady=(2, 12))
         self.status = tk.StringVar(value="READY")
         ttk.Label(frame, textvariable=self.status, font=("Segoe UI", 12, "bold"), wraplength=760).pack(anchor="w", pady=6)
-        ttk.Label(frame, text="ChatGPT plan allowance · Local selectable Whisper · Streaming neural voice with Windows fallback.", wraplength=760).pack(anchor="w")
+        ttk.Label(frame, text="ChatGPT plan allowance · Optional live web lookup · Local selectable Whisper · Streaming neural voice.", wraplength=760).pack(anchor="w")
 
         settings = ttk.Frame(frame)
         settings.pack(fill="x", pady=12)
@@ -103,15 +108,21 @@ class Dispatch:
         saved_whisper = self.state.get("whisper_model", DEFAULT_WHISPER)
         if saved_whisper not in WHISPER_MODELS:
             saved_whisper = DEFAULT_WHISPER
+        saved_web = self.state.get("web_mode", DEFAULT_WEB_MODE)
+        if saved_web not in WEB_MODES:
+            saved_web = DEFAULT_WEB_MODE
         self.voice_choice = tk.StringVar(value=saved_voice)
         self.speed_choice = tk.StringVar(value=saved_speed)
         self.whisper_choice = tk.StringVar(value=saved_whisper)
+        self.web_choice = tk.StringVar(value=saved_web)
         self._row(settings, "Dispatch voice", ttk.Combobox(settings, textvariable=self.voice_choice,
                                                            values=VOICE_CHOICES, state="readonly"), 4)
         self._row(settings, "Speech speed", ttk.Combobox(settings, textvariable=self.speed_choice,
                                                          values=list(SPEED_CHOICES), state="readonly"), 5)
         self._row(settings, "Whisper model", ttk.Combobox(settings, textvariable=self.whisper_choice,
                                                           values=list(WHISPER_MODELS), state="readonly"), 6)
+        self._row(settings, "Web lookup", ttk.Combobox(settings, textvariable=self.web_choice,
+                                                       values=WEB_MODES, state="readonly"), 7)
         settings.columnconfigure(1, weight=1)
 
         bar = ttk.Frame(frame)
@@ -127,6 +138,7 @@ class Dispatch:
         self.armed = tk.BooleanVar(value=False)
         ttk.Checkbutton(frame, text="Enable F8 hotkey (after checking the capture)", variable=self.armed,
                         command=self.arm).pack(anchor="w", pady=(8, 4))
+        ttk.Label(frame, text="Web Auto lets Dispatch search when useful; Asked only searches only when you explicitly request a lookup.", wraplength=760).pack(anchor="w")
         ttk.Label(frame, text="Tiny Whisper is fastest; Base is the default balance; Small favors transcription accuracy.", wraplength=760).pack(anchor="w")
 
         notebook = ttk.Notebook(frame)
@@ -170,7 +182,7 @@ class Dispatch:
         ttk.Button(note_bar, text="Save confirmed notes", command=self.save_notes).pack(side="left")
         self.clear_button = ttk.Button(note_bar, text="Clear radio history", command=self.clear_history)
         self.clear_button.pack(side="left", padx=8)
-        ttk.Label(frame, text="v0.4 · Streaming speech · Latency telemetry · F9 cancels · Max mic recording: 30 seconds").pack(anchor="w")
+        ttk.Label(frame, text="v0.5 · Optional web lookup · Streaming speech · Latency telemetry · F9 cancels · Max mic recording: 30 seconds").pack(anchor="w")
         for item in self.state["history"]:
             self.write_log("YOU" if item["role"] == "user" else "DISPATCH", item["content"])
 
@@ -206,7 +218,7 @@ class Dispatch:
                     with self.key_lock:
                         self.key_down = False
                     self.record_stop.set()
-                f8_was_down, f9_was_down = f8_down, f9_was_down if False else f9_down
+                f8_was_down, f9_was_down = f8_down, f9_down
         try:
             self.hotkey_thread = threading.Thread(target=watch, daemon=True)
             self.hotkey_thread.start()
@@ -226,6 +238,63 @@ class Dispatch:
         self.log.see("end")
         self.log.configure(state="disabled")
 
+    def _insert_web_link(self, label, url):
+        self.link_counter += 1
+        tag = f"web_link_{self.link_counter}"
+        self.log.insert("end", label, tag)
+        self.log.tag_config(tag, foreground="#78b7ff", underline=True)
+        self.log.tag_bind(tag, "<Button-1>", lambda _event, target=url: webbrowser.open(target))
+        self.log.tag_bind(tag, "<Enter>", lambda _event: self.log.configure(cursor="hand2"))
+        self.log.tag_bind(tag, "<Leave>", lambda _event: self.log.configure(cursor=""))
+
+    def write_answer(self, answer, citations):
+        self.log.configure(state="normal")
+        self.log.insert("end", f"DISPATCH  {time.strftime('%H:%M:%S')}\n")
+
+        sources = {}
+        source_order = []
+        markers = []
+        for citation in citations or []:
+            url = citation.get("url", "")
+            if not url:
+                continue
+            if url not in sources:
+                sources[url] = (len(source_order) + 1, citation.get("title") or url)
+                source_order.append(url)
+            number, _ = sources[url]
+            end_index = citation.get("end_index")
+            if isinstance(end_index, int) and 0 <= end_index <= len(answer):
+                markers.append((end_index, number, url))
+
+        cursor = 0
+        inserted_marker = False
+        for end_index, number, url in sorted(markers, key=lambda item: item[0]):
+            if end_index < cursor:
+                continue
+            self.log.insert("end", answer[cursor:end_index])
+            self._insert_web_link(f"[{number}]", url)
+            inserted_marker = True
+            cursor = end_index
+        self.log.insert("end", answer[cursor:])
+
+        if source_order and not inserted_marker:
+            self.log.insert("end", " ")
+            for index, url in enumerate(source_order):
+                if index:
+                    self.log.insert("end", " ")
+                self._insert_web_link(f"[{sources[url][0]}]", url)
+
+        if source_order:
+            self.log.insert("end", "\nSources: ")
+            for index, url in enumerate(source_order):
+                if index:
+                    self.log.insert("end", " · ")
+                number, title = sources[url]
+                self._insert_web_link(f"[{number}] {title}", url)
+        self.log.insert("end", "\n\n")
+        self.log.see("end")
+        self.log.configure(state="disabled")
+
     def save_notes(self, announce=True):
         for key, variable in self.fields.items():
             self.state[key] = variable.get().strip()
@@ -234,9 +303,10 @@ class Dispatch:
         self.state["voice_name"] = self.voice_choice.get()
         self.state["voice_speed"] = self.speed_choice.get()
         self.state["whisper_model"] = self.whisper_choice.get()
+        self.state["web_mode"] = self.web_choice.get()
         save_state(STATE_PATH, self.state)
         if announce:
-            self.write_log("SYSTEM", "Confirmed notes and voice/speed settings saved locally.")
+            self.write_log("SYSTEM", "Confirmed notes and voice/speed/web settings saved locally.")
 
     def clear_history(self):
         if self.busy:
@@ -253,7 +323,7 @@ class Dispatch:
             raise ValueError("Enter part of the game window's title.")
         return (self.capture_mode.get(), fragment, self.input_devices[self.input_choice.get()],
                 self.output_devices[self.output_choice.get()], self.voice_choice.get(),
-                self.speed_choice.get(), self.whisper_choice.get())
+                self.speed_choice.get(), self.whisper_choice.get(), self.web_choice.get())
 
     def _start(self, target, needs_api=True):
         if self.busy:
@@ -328,7 +398,8 @@ class Dispatch:
             if not question:
                 raise RuntimeError("No speech recognized. Try again with your headset mic.")
             timings["pre_model"] = time.perf_counter() - started
-            self.respond(question, url, source, options[3], options[4], options[5], state, timings)
+            self.respond(question, url, source, options[3], options[4], options[5],
+                         state, options[7], timings)
         self._start(work)
         if self.busy:
             self.talk_button.configure(text="Stop mic")
@@ -349,12 +420,14 @@ class Dispatch:
             capture_started = time.perf_counter()
             _, url, source = capture(options[0], options[1])
             timings["capture"] = time.perf_counter() - capture_started
-            self.respond(question, url, source, options[3], options[4], options[5], state, timings)
+            self.respond(question, url, source, options[3], options[4], options[5],
+                         state, options[7], timings)
         self._start(work)
         if self.busy:
             self.question.set("")
 
-    def respond(self, question, url, source, output_device, voice_name, speed_name, state, timings=None):
+    def respond(self, question, url, source, output_device, voice_name, speed_name,
+                state, web_mode, timings=None):
         if self.cancel.is_set():
             return
         timings = timings or {}
@@ -362,10 +435,22 @@ class Dispatch:
         self.events.put(("status", "ANALYZING · speech will begin after first complete sentence"))
         profile = state.get("player_profile", "")
 
+        explicit_web = requests_web_lookup(question)
+        if web_mode == "Off":
+            web_policy = "off"
+            if explicit_web:
+                self.events.put(("system", "WEB · lookup was requested, but Web lookup is Off."))
+        elif web_mode == "Asked only":
+            web_policy = "required" if explicit_web else "off"
+        else:
+            web_policy = "required" if explicit_web else "auto"
+
         speech_queue = queue.Queue()
         speech_stats = {}
         fallback_used = threading.Event()
         model_started = time.perf_counter()
+        citations = []
+        web_stats = {"used": False, "started": None, "completed": None}
 
         def speech_worker():
             speech_started = None
@@ -401,10 +486,22 @@ class Dispatch:
             for sentence in sentences:
                 speech_queue.put(sentence)
 
+        def on_web_search(event_type):
+            now = time.perf_counter()
+            if not web_stats["used"]:
+                web_stats["used"] = True
+                web_stats["started"] = now
+                self.events.put(("status", "SEARCHING WEB · live lookup"))
+                self.events.put(("system", "WEB · Dispatch used live web search for this reply."))
+            if event_type.endswith(".completed"):
+                web_stats["completed"] = now
+
         try:
-            answer = self.client.answer(SYSTEM_PROMPT + "\nPlayer profile (not game progress):\n" + profile,
-                                        build_input(state, question, url, source), self.cancel,
-                                        on_delta=on_delta)
+            answer = self.client.answer(
+                SYSTEM_PROMPT + "\nPlayer profile (not game progress):\n" + profile,
+                build_input(state, question, url, source), self.cancel,
+                on_delta=on_delta, web_policy=web_policy,
+                on_web_search=on_web_search, on_citations=citations.extend)
             timings["model_total"] = time.perf_counter() - model_started
             if self.cancel.is_set():
                 return
@@ -414,7 +511,10 @@ class Dispatch:
                 if "first_sentence" not in timings:
                     timings["first_sentence"] = timings["model_total"]
                 speech_queue.put(stream_buffer.strip())
-            self.events.put(("answer", (question, answer)))
+            if web_stats["used"] and web_stats["started"] is not None:
+                web_finished = web_stats["completed"] or time.perf_counter()
+                timings["web_search"] = web_finished - web_stats["started"]
+            self.events.put(("answer", (question, answer, citations)))
         except Exception:
             self.play_stop.set()
             raise
@@ -432,9 +532,9 @@ class Dispatch:
     def _report_timings(self, timings):
         parts = []
         labels = (("capture", "capture"), ("transcribe", "transcribe"),
-                  ("model_first_token", "first token"), ("first_sentence", "first sentence"),
-                  ("speech_start", "speech start"), ("model_total", "model total"),
-                  ("speech_total", "speech playback"))
+                  ("web_search", "web search"), ("model_first_token", "first token"),
+                  ("first_sentence", "first sentence"), ("speech_start", "speech start"),
+                  ("model_total", "model total"), ("speech_total", "speech playback"))
         for key, label in labels:
             if key in timings:
                 parts.append(f"{label} {timings[key]:.2f}s")
@@ -483,8 +583,8 @@ class Dispatch:
                 elif kind == "question":
                     self.write_log("YOU", value)
                 elif kind == "answer":
-                    question, answer = value
-                    self.write_log("DISPATCH", answer)
+                    question, answer, citations = value
+                    self.write_answer(answer, citations)
                     append_turn(self.state, question, answer)
                     try:
                         save_state(STATE_PATH, self.state)
