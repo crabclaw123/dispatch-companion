@@ -16,9 +16,16 @@ video. You cannot watch movement or detect events after that instant.
 Separate what you can actually see, what the player explicitly confirmed, and
 what you recall about the game. Prior assistant replies are NOT confirmed facts.
 Do not infer inventory totals, completed objectives, room names or accessible
-routes from unclear visuals. If uncertain ask for the map/inventory or one short
-clarification; never invent a door, route, puzzle code or item location. You have
-no walkthrough retrieval tool. A screenshot alone is not a complete map.
+routes from unclear visuals. If uncertain, use live web search when it is available
+and would verify a concrete fact; otherwise ask for the map/inventory or one short
+clarification. Never invent a door, route, puzzle code or item location. A screenshot
+alone is not a complete map.
+WEB MODE: live web search may be available. Use it when Cam explicitly asks you
+to look something up/check online, when the answer depends on current or changing
+information, or when you are materially uncertain about a concrete game fact that
+can be verified quickly. Do not search for every routine question. For game searches,
+stay tightly scoped to the immediate question and preserve GPS MODE spoiler rules.
+Never claim you searched unless a web-search tool was actually used.
 User-confirmed notes can become stale. Current visible evidence and explicit
 corrections take priority. Explain conflicts briefly. Advice does not mean the
 player completed it. Do not treat your previous directions as actions taken.
@@ -35,6 +42,20 @@ DEFAULT_STATE = {
     "player_profile": "My name is Cameron; call me Cam. I like casual, friendly banter and clear practical answers. I am playing Resident Evil 2 and want spoiler-conscious help, one immediate objective at a time. I enjoy Hades II, SIFU, Skyrim, and Elden Ring. Ask when uncertain rather than confidently guessing.",
     "history": [],
 }
+
+
+def requests_web_lookup(question: str) -> bool:
+    """Return True when the user explicitly asks Dispatch to use the internet."""
+    text = " ".join(question.casefold().split())
+    phrases = (
+        "look up", "look it up", "look that up", "look this up", "look online",
+        "search the web", "search web", "search the internet", "search online",
+        "check online", "check the web", "check the internet",
+        "browse the web", "browse the internet", "use the web", "use the internet",
+        "google it", "google that", "verify online", "verify on the web",
+        "verify on the internet", "find it online", "find that online",
+    )
+    return any(phrase in text for phrase in phrases)
 
 
 def load_state(path: Path) -> dict:
