@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import wave
 
+from core import speech_text
 from devices import play_wav
 
 
@@ -197,6 +198,9 @@ def _record_fallback_reason(voice_name, error):
 
 def speak(text, device, cancel, voice_name=DEFAULT_VOICE, speed_name=DEFAULT_SPEED):
     """Speak through the selected output. Edge voices automatically fall back to Windows."""
+    text = speech_text(text)
+    if not text or cancel.is_set():
+        return "skipped"
     if voice_name == WINDOWS_VOICE:
         _speak_windows(text, device, cancel, speed_name)
         return "Windows"
