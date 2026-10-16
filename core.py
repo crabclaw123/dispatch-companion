@@ -26,7 +26,8 @@ to look something up/check online, when the answer depends on current or changin
 information, or when you are materially uncertain about a concrete game fact that
 can be verified quickly. Do not search for every routine question. For game searches,
 stay tightly scoped to the immediate question and preserve GPS MODE spoiler rules.
-Never claim you searched unless a web-search tool was actually used.
+Do not state whether web search was or was not used; the Dispatch app reports tool
+usage separately in the Radio Log and is the authoritative source for that status.
 User-confirmed notes can become stale. Current visible evidence and explicit
 corrections take priority. Explain conflicts briefly. Advice does not mean the
 player completed it. Do not treat your previous directions as actions taken.
@@ -49,8 +50,25 @@ def _normalized_question(question: str) -> str:
     return " ".join(question.casefold().split())
 
 
+def rejects_web_lookup(question: str) -> bool:
+    """Return True when the user explicitly asks Dispatch not to use the internet."""
+    text = _normalized_question(question)
+    phrases = (
+        "non-web", "non web", "no web", "without web", "without the web",
+        "no internet", "without internet", "without the internet",
+        "don't search", "do not search", "dont search", "don't browse", "do not browse",
+        "don't look up", "do not look up", "dont look up", "don't look that up",
+        "do not look that up", "don't use the web", "do not use the web",
+        "don't use the internet", "do not use the internet",
+        "no web search", "without web search", "no internet search", "without internet search",
+    )
+    return any(phrase in text for phrase in phrases)
+
+
 def requests_web_lookup(question: str) -> bool:
     """Return True when the user explicitly asks Dispatch to use the internet."""
+    if rejects_web_lookup(question):
+        return False
     text = _normalized_question(question)
     phrases = (
         "look up", "look it up", "look that up", "look this up", "look online",
@@ -66,6 +84,8 @@ def requests_web_lookup(question: str) -> bool:
 
 def should_offer_web_lookup(question: str) -> bool:
     """Cheap local gate for Auto mode so routine questions keep the no-tool fast path."""
+    if rejects_web_lookup(question):
+        return False
     if requests_web_lookup(question):
         return True
     text = _normalized_question(question)
@@ -85,7 +105,6 @@ def speech_text(text: str) -> str:
     """Remove URLs/citation markup that should remain visible but never be spoken."""
     if not text:
         return ""
-    # Parenthesized Markdown links from web citations are citation-only: drop them entirely.
     text = re.sub(r"\(\s*\[[^\]]+\]\(https?://[^)\s]+\)\s*\)", "", text)
 
     def markdown_link(match):
