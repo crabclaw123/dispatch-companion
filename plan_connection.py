@@ -38,6 +38,24 @@ class PlanConnection:
                     })
         return citations
 
+    @classmethod
+    def _last_user_text(cls, messages):
+        for item in reversed(messages or []):
+            if cls._field(item, "role") != "user":
+                continue
+            content = cls._field(item, "content", "")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                chunks = []
+                for part in content:
+                    if cls._field(part, "type") == "input_text":
+                        text = cls._field(part, "text", "")
+                        if text:
+                            chunks.append(text)
+                return "\n".join(chunks)
+        return ""
+
     def answer(self, instructions, messages, cancel, on_delta=None, web_policy="off",
                on_web_search=None, on_citations=None):
         if web_policy not in ("off", "auto", "required"):
@@ -60,9 +78,18 @@ class PlanConnection:
                         max_retries=0, timeout=45)
         request = dict(model=self.model, instructions=instructions,
                        input=messages, store=False, stream=True)
-        if web_policy != "off":
+        effective_web_policy = web_policy
+        if web_policy == "auto":
+            # Advertising a tool on every turn adds routing overhead even when unused.
+            # Use a cheap local relevance gate so routine game questions keep the exact
+            # old fast path, while freshness/verification questions can still let the
+            # model decide whether a search is necessary.
+            from core import should_offer_web_lookup
+            if not should_offer_web_lookup(self._last_user_text(messages)):
+                effective_web_policy = "off"
+        if effective_web_policy != "off":
             request["tools"] = [{"type": "web_search", "search_context_size": "low"}]
-            request["tool_choice"] = "required" if web_policy == "required" else "auto"
+            request["tool_choice"] = "required" if effective_web_policy == "required" else "auto"
         try:
             pieces, completed = [], False
             with client.responses.create(**request) as stream:
