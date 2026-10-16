@@ -5,8 +5,8 @@ import tempfile
 import unittest
 
 from core import (DEFAULT_STATE, append_turn, build_input, load_state,
-                  requests_web_lookup, save_state, should_offer_web_lookup,
-                  speech_text)
+                  rejects_web_lookup, requests_web_lookup, save_state,
+                  should_offer_web_lookup, speech_text)
 
 
 class StateTests(unittest.TestCase):
@@ -62,6 +62,16 @@ class StateTests(unittest.TestCase):
                          "Google it, bro."):
             self.assertTrue(requests_web_lookup(question), question)
         self.assertFalse(requests_web_lookup("How do I get back to the main hall?"))
+
+    def test_explicit_no_web_wording_overrides_lookup_keywords(self):
+        for question in ("Testing speed of non-web look up response.",
+                         "No web search for this one.",
+                         "Answer without the internet.",
+                         "Don't look that up, just answer normally.",
+                         "Do not search the web for this."):
+            self.assertTrue(rejects_web_lookup(question), question)
+            self.assertFalse(requests_web_lookup(question), question)
+            self.assertFalse(should_offer_web_lookup(question), question)
 
     def test_auto_web_gate_only_opens_for_freshness_or_verification_cues(self):
         for question in ("What's the latest RE2 patch?",
