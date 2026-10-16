@@ -54,7 +54,8 @@ def requests_web_lookup(question: str) -> bool:
     text = _normalized_question(question)
     phrases = (
         "look up", "look it up", "look that up", "look this up", "look online",
-        "search the web", "search web", "search the internet", "search online",
+        "search the web", "search web", "web search",
+        "search the internet", "internet search", "search online", "online search",
         "check online", "check the web", "check the internet",
         "browse the web", "browse the internet", "use the web", "use the internet",
         "google it", "google that", "verify online", "verify on the web",
