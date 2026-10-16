@@ -1,12 +1,15 @@
-"""Local Whisper transcription plus neural/Windows speech playback."""
+"""Local Whisper transcription plus pipelined neural/Windows speech playback."""
 import asyncio
 import base64
+from collections import deque
 import io
 import os
 from pathlib import Path
 import re
 import subprocess
 import tempfile
+import threading
+import time
 import wave
 
 from core import speech_text
@@ -52,6 +55,7 @@ DEFAULT_WHISPER = "Base — balanced"
 
 ROOT = Path(__file__).resolve().parent
 VOICE_ERROR_LOG = ROOT / "local" / "voice-error.log"
+PERF_LOG_PATH = ROOT / "local" / "performance.log"
 
 
 class LocalVoice:
@@ -74,12 +78,181 @@ class LocalVoice:
         return " ".join(segment.text.strip() for segment in segments).strip()
 
 
+class _SpeechEntry:
+    def __init__(self, text, stream_id=None):
+        self.text = text
+        self.stream_id = stream_id
+        self.claimed = False
+        self.ready = threading.Event()
+        self.audio = b""
+        self.engine = None
+        self.error = None
+        self.synth_seconds = 0.0
+        self.ready_at = None
+
+
+class _SpeechPipeline:
+    """Pre-synthesize later sentences while the current sentence is playing."""
+
+    def __init__(self):
+        self.condition = threading.Condition()
+        self.entries = deque()
+        # voice, speed, cancel event, model-stream id, playback-thread id
+        self.context = None
+        self.sequence = 0
+        self.last_playback_end = None
+        self.worker = threading.Thread(target=self._run, daemon=True, name="dispatch-tts-prefetch")
+        self.worker.start()
+
+    def register(self, text, stream_id):
+        text = speech_text(text)
+        if not text:
+            return
+        with self.condition:
+            self.entries.append(_SpeechEntry(text, stream_id))
+            self.condition.notify_all()
+
+    def claim(self, text, voice_name, speed_name, cancel):
+        text = speech_text(text)
+        if not text:
+            return None, 0, None
+
+        caller_id = id(threading.current_thread())
+        with self.condition:
+            entry = next((item for item in self.entries
+                          if not item.claimed and item.text == text), None)
+
+            if entry is not None:
+                target_stream = entry.stream_id
+            elif self.context is not None and self.context[4] == caller_id:
+                # The unfinished final tail is queued directly by Dispatch rather than
+                # passing through ready_sentences; keep it in the same response stream.
+                target_stream = self.context[3]
+            else:
+                target_stream = ("direct", time.monotonic_ns())
+                entry = _SpeechEntry(text, target_stream)
+                self.entries.append(entry)
+
+            if entry is None:
+                entry = _SpeechEntry(text, target_stream)
+                self.entries.append(entry)
+
+            same_context = (
+                self.context is not None
+                and self.context[0] == voice_name
+                and self.context[1] == speed_name
+                and self.context[3] == target_stream
+                and self.context[4] == caller_id
+            )
+            if not same_context:
+                self._switch_context_locked(
+                    voice_name, speed_name, cancel, target_stream, caller_id
+                )
+
+            entry.claimed = True
+            self.sequence += 1
+            sequence = self.sequence
+            previous_end = self.last_playback_end
+            self.condition.notify_all()
+            return entry, sequence, previous_end
+
+    def _switch_context_locked(self, voice_name, speed_name, cancel,
+                               target_stream, caller_id):
+        kept = deque()
+        for item in self.entries:
+            if item.stream_id == target_stream:
+                kept.append(item)
+            elif not item.ready.is_set():
+                item.engine = "cancelled"
+                item.ready_at = time.perf_counter()
+                item.ready.set()
+        self.entries = kept
+        self.context = (voice_name, speed_name, cancel, target_stream, caller_id)
+        self.sequence = 0
+        self.last_playback_end = None
+
+    def finish(self, entry, playback_end):
+        with self.condition:
+            try:
+                self.entries.remove(entry)
+            except ValueError:
+                pass
+            self.last_playback_end = playback_end
+            # Keep context until a new response stream arrives. ready_sentences tags
+            # each model response with its generating thread, so a later request cannot
+            # accidentally pre-synthesize with this response's old voice/settings.
+            self.condition.notify_all()
+
+    def cancel_all(self):
+        with self.condition:
+            self._clear_locked()
+            self.condition.notify_all()
+
+    def _clear_locked(self):
+        for entry in self.entries:
+            if not entry.ready.is_set():
+                entry.engine = "cancelled"
+                entry.ready_at = time.perf_counter()
+                entry.ready.set()
+        self.entries.clear()
+        self.context = None
+        self.sequence = 0
+        self.last_playback_end = None
+
+    def _next_unsynthesized_locked(self):
+        if self.context is None:
+            return None
+        active_stream = self.context[3]
+        for entry in self.entries:
+            if entry.stream_id == active_stream and not entry.ready.is_set():
+                return entry
+        return None
+
+    def _run(self):
+        while True:
+            with self.condition:
+                self.condition.wait_for(
+                    lambda: self.context is not None
+                    and self._next_unsynthesized_locked() is not None
+                )
+                entry = self._next_unsynthesized_locked()
+                voice_name, speed_name, cancel, _, _ = self.context
+
+            if cancel.is_set():
+                with self.condition:
+                    if not entry.ready.is_set():
+                        entry.engine = "cancelled"
+                        entry.ready_at = time.perf_counter()
+                        entry.ready.set()
+                continue
+
+            started = time.perf_counter()
+            try:
+                audio, engine = _synthesize_speech(
+                    entry.text, cancel, voice_name, speed_name
+                )
+                entry.audio = audio
+                entry.engine = engine
+            except Exception as error:
+                entry.error = error
+            finally:
+                entry.synth_seconds = time.perf_counter() - started
+                entry.ready_at = time.perf_counter()
+                entry.ready.set()
+
+
+_SPEECH_PIPELINE = _SpeechPipeline()
+
+
 def ready_sentences(buffer):
-    """Return completed speakable sentences plus any unfinished tail."""
+    """Return completed sentences and pre-register them for background TTS synthesis."""
     parts = re.split(r"(?<=[.!?])\s+", buffer)
     if len(parts) <= 1:
         return [], buffer
     complete = [part.strip() for part in parts[:-1] if part.strip()]
+    stream_id = id(threading.current_thread())
+    for sentence in complete:
+        _SPEECH_PIPELINE.register(sentence, stream_id)
     return complete, parts[-1]
 
 
@@ -132,18 +305,18 @@ def _mp3_to_wav(content: bytes) -> bytes:
     return buffer.getvalue()
 
 
-def _speak_edge(text, device, cancel, voice_name, speed_name):
+def _edge_wav(text, cancel, voice_name, speed_name):
     voice = EDGE_VOICES.get(voice_name, EDGE_VOICES[DEFAULT_VOICE])
     rate = SPEED_CHOICES.get(speed_name, SPEED_CHOICES[DEFAULT_SPEED])
     mp3 = asyncio.run(_edge_mp3(text, voice, rate, cancel))
     if cancel.is_set():
-        return
+        return b""
     if not mp3:
         raise RuntimeError("Edge TTS returned no audio")
-    play_wav(_mp3_to_wav(mp3), device, cancel)
+    return _mp3_to_wav(mp3)
 
 
-def _speak_windows(text, device, cancel, speed_name=DEFAULT_SPEED):
+def _windows_wav(text, cancel, speed_name=DEFAULT_SPEED):
     # Text comes through stdin, file path/rate through environment; no model-written
     # text is interpreted as PowerShell code. The transient WAV is deleted.
     script = """$ErrorActionPreference = 'Stop'
@@ -174,11 +347,10 @@ try {
                 if cancel.wait(0.05):
                     process.terminate()
                     process.wait(timeout=5)
-                    return
+                    return b""
             if process.returncode != 0 or not path.exists():
                 raise RuntimeError("Windows speech failed. Your text reply is still in the radio log.")
-            if not cancel.is_set():
-                play_wav(path.read_bytes(), device, cancel)
+            return path.read_bytes()
         finally:
             if process.poll() is None:
                 process.terminate()
@@ -196,20 +368,86 @@ def _record_fallback_reason(voice_name, error):
         pass
 
 
-def speak(text, device, cancel, voice_name=DEFAULT_VOICE, speed_name=DEFAULT_SPEED):
-    """Speak through the selected output. Edge voices automatically fall back to Windows."""
-    text = speech_text(text)
-    if not text or cancel.is_set():
-        return "skipped"
+def _synthesize_speech(text, cancel, voice_name=DEFAULT_VOICE, speed_name=DEFAULT_SPEED):
+    if cancel.is_set():
+        return b"", "cancelled"
     if voice_name == WINDOWS_VOICE:
-        _speak_windows(text, device, cancel, speed_name)
-        return "Windows"
+        return _windows_wav(text, cancel, speed_name), "Windows"
     try:
-        _speak_edge(text, device, cancel, voice_name, speed_name)
-        return "Edge"
+        return _edge_wav(text, cancel, voice_name, speed_name), "Edge"
     except Exception as error:
         if cancel.is_set():
-            return "cancelled"
+            return b"", "cancelled"
         _record_fallback_reason(voice_name, error)
-        _speak_windows(text, device, cancel, speed_name)
-        return "Windows fallback"
+        return _windows_wav(text, cancel, speed_name), "Windows fallback"
+
+
+def _record_voice_timing(sequence, engine, synth_seconds, queue_wait,
+                         tts_wait, audible_gap, playback_seconds, prefetched):
+    parts = [
+        f"VOICE · sentence {sequence}",
+        f"engine {engine}",
+        f"synth {synth_seconds:.2f}s",
+    ]
+    if queue_wait is not None:
+        parts.append(f"queue wait {queue_wait:.2f}s")
+    parts.append(f"tts wait {tts_wait:.2f}s")
+    if audible_gap is not None:
+        parts.append(f"audible gap {audible_gap:.2f}s")
+    parts.append(f"playback {playback_seconds:.2f}s")
+    parts.append("prefetched yes" if prefetched else "prefetched no")
+    message = " · ".join(parts)
+    try:
+        PERF_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with PERF_LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(time.strftime("%Y-%m-%d %H:%M:%S") + " " + message + "\n")
+    except OSError:
+        pass
+    print("DISPATCH", message)
+
+
+def speak(text, device, cancel, voice_name=DEFAULT_VOICE, speed_name=DEFAULT_SPEED):
+    """Speak selected text while pre-synthesizing any later queued sentences."""
+    text = speech_text(text)
+    if not text or cancel.is_set():
+        if cancel.is_set():
+            _SPEECH_PIPELINE.cancel_all()
+        return "skipped"
+
+    called_at = time.perf_counter()
+    entry, sequence, previous_end = _SPEECH_PIPELINE.claim(
+        text, voice_name, speed_name, cancel
+    )
+    if entry is None:
+        return "skipped"
+
+    while not entry.ready.wait(0.05):
+        if cancel.is_set():
+            _SPEECH_PIPELINE.cancel_all()
+            return "cancelled"
+
+    if entry.error is not None:
+        _SPEECH_PIPELINE.finish(entry, time.perf_counter())
+        raise entry.error
+    if cancel.is_set() or entry.engine == "cancelled" or not entry.audio:
+        _SPEECH_PIPELINE.cancel_all()
+        return "cancelled"
+
+    playback_started = time.perf_counter()
+    queue_wait = None if previous_end is None else max(0.0, called_at - previous_end)
+    tts_wait = max(0.0, playback_started - called_at)
+    audible_gap = None if previous_end is None else max(0.0, playback_started - previous_end)
+    prefetched = entry.ready_at is not None and entry.ready_at <= called_at
+
+    play_wav(entry.audio, device, cancel)
+    playback_ended = time.perf_counter()
+    playback_seconds = playback_ended - playback_started
+    engine = entry.engine or "unknown"
+    synth_seconds = entry.synth_seconds
+    _SPEECH_PIPELINE.finish(entry, playback_ended)
+
+    _record_voice_timing(
+        sequence, engine, synth_seconds, queue_wait, tts_wait,
+        audible_gap, playback_seconds, prefetched
+    )
+    return engine
