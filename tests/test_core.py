@@ -56,6 +56,8 @@ class StateTests(unittest.TestCase):
     def test_explicit_web_request_phrases_are_detected(self):
         for question in ("Dispatch, look that up for me.",
                          "Can you search the web for that?",
+                         "Retesting web search and speed of response.",
+                         "Try an internet search for this.",
                          "Check online and verify the safe code.",
                          "Google it, bro."):
             self.assertTrue(requests_web_lookup(question), question)
