@@ -9,7 +9,39 @@ class PlanConnection:
         self.tokens = dict(tokens)
         self.model = model
 
-    def answer(self, instructions, messages, cancel, on_delta=None):
+    @staticmethod
+    def _field(value, name, default=None):
+        if isinstance(value, dict):
+            return value.get(name, default)
+        return getattr(value, name, default)
+
+    @classmethod
+    def _extract_citations(cls, response):
+        citations = []
+        if response is None:
+            return citations
+        for item in cls._field(response, "output", []) or []:
+            if cls._field(item, "type") != "message":
+                continue
+            for part in cls._field(item, "content", []) or []:
+                for annotation in cls._field(part, "annotations", []) or []:
+                    if cls._field(annotation, "type") != "url_citation":
+                        continue
+                    url = cls._field(annotation, "url", "")
+                    if not url:
+                        continue
+                    citations.append({
+                        "url": url,
+                        "title": cls._field(annotation, "title", "") or url,
+                        "start_index": cls._field(annotation, "start_index"),
+                        "end_index": cls._field(annotation, "end_index"),
+                    })
+        return citations
+
+    def answer(self, instructions, messages, cancel, on_delta=None, web_policy="off",
+               on_web_search=None, on_citations=None):
+        if web_policy not in ("off", "auto", "required"):
+            raise ValueError("Invalid web search policy")
         if time.time() >= self.tokens["expires_at"] - 90:
             old = self.tokens
             if not old.get("refresh_token"):
@@ -26,21 +58,31 @@ class PlanConnection:
             return ""
         client = OpenAI(api_key=self.tokens["access_token"], base_url=RESOURCE,
                         max_retries=0, timeout=45)
+        request = dict(model=self.model, instructions=instructions,
+                       input=messages, store=False, stream=True)
+        if web_policy != "off":
+            request["tools"] = [{"type": "web_search", "search_context_size": "low"}]
+            request["tool_choice"] = "required" if web_policy == "required" else "auto"
         try:
             pieces, completed = [], False
-            with client.responses.create(model=self.model, instructions=instructions,
-                                         input=messages, store=False, stream=True) as stream:
+            with client.responses.create(**request) as stream:
                 for event in stream:
                     if cancel.is_set():
                         return ""
-                    if event.type == "response.output_text.delta":
+                    event_type = event.type
+                    if event_type == "response.output_text.delta":
                         pieces.append(event.delta)
                         if on_delta:
                             on_delta(event.delta)
-                    elif event.type in ("response.failed", "response.incomplete", "error"):
+                    elif event_type.startswith("response.web_search_call."):
+                        if on_web_search:
+                            on_web_search(event_type)
+                    elif event_type in ("response.failed", "response.incomplete", "error"):
                         raise RuntimeError("ChatGPT plan request failed. Check your plan allowance/app permission. No paid fallback is enabled.")
-                    elif event.type == "response.completed":
+                    elif event_type == "response.completed":
                         completed = True
+                        if on_citations:
+                            on_citations(self._extract_citations(getattr(event, "response", None)))
             if not completed:
                 raise RuntimeError("ChatGPT connection ended before the reply completed. Try again.")
             return "".join(pieces).strip()
