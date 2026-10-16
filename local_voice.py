@@ -178,9 +178,6 @@ class _SpeechPipeline:
             except ValueError:
                 pass
             self.last_playback_end = playback_end
-            # Keep context until a new response stream arrives. ready_sentences tags
-            # each model response with its generating thread, so a later request cannot
-            # accidentally pre-synthesize with this response's old voice/settings.
             self.condition.notify_all()
 
     def cancel_all(self):
@@ -244,16 +241,42 @@ class _SpeechPipeline:
 _SPEECH_PIPELINE = _SpeechPipeline()
 
 
+_ABBREVIATION_END = re.compile(
+    r"(?:\b(?:mr|mrs|ms|dr|prof|sr|jr|st|vs|etc)|(?:\b[a-z]\.){1,4})\.$",
+    re.IGNORECASE,
+)
+
+
+def _terminal_sentence(text):
+    """Treat a streamed terminal punctuation mark as complete without waiting for whitespace."""
+    stripped = text.strip()
+    if len(stripped) < 8 or not stripped.endswith((".", "!", "?")):
+        return False
+    if stripped.endswith("...") or _ABBREVIATION_END.search(stripped):
+        return False
+    return True
+
+
 def ready_sentences(buffer):
     """Return completed sentences and pre-register them for background TTS synthesis."""
     parts = re.split(r"(?<=[.!?])\s+", buffer)
-    if len(parts) <= 1:
-        return [], buffer
     complete = [part.strip() for part in parts[:-1] if part.strip()]
+    tail = parts[-1] if parts else buffer
+
+    # Streaming APIs often finish the last sentence with punctuation but no trailing
+    # whitespace. Recognize that immediately so the final sentence can synthesize while
+    # the previous one is still playing instead of waiting for response.completed.
+    if _terminal_sentence(tail):
+        complete.append(tail.strip())
+        tail = ""
+
+    if not complete:
+        return [], buffer
+
     stream_id = id(threading.current_thread())
     for sentence in complete:
         _SPEECH_PIPELINE.register(sentence, stream_id)
-    return complete, parts[-1]
+    return complete, tail
 
 
 async def _edge_mp3_once(text: str, voice: str, rate: str, cancel) -> bytes:
