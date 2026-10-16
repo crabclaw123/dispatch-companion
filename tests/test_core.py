@@ -5,7 +5,8 @@ import tempfile
 import unittest
 
 from core import (DEFAULT_STATE, append_turn, build_input, load_state,
-                  requests_web_lookup, save_state)
+                  requests_web_lookup, save_state, should_offer_web_lookup,
+                  speech_text)
 
 
 class StateTests(unittest.TestCase):
@@ -59,6 +60,23 @@ class StateTests(unittest.TestCase):
                          "Google it, bro."):
             self.assertTrue(requests_web_lookup(question), question)
         self.assertFalse(requests_web_lookup("How do I get back to the main hall?"))
+
+    def test_auto_web_gate_only_opens_for_freshness_or_verification_cues(self):
+        for question in ("What's the latest RE2 patch?",
+                         "Is Resident Evil 2 on sale right now?",
+                         "Are you sure that safe code is correct?",
+                         "Double check that for me."):
+            self.assertTrue(should_offer_web_lookup(question), question)
+        self.assertFalse(should_offer_web_lookup("How do I get back to the main hall?"))
+        self.assertFalse(should_offer_web_lookup("What is my current objective?"))
+
+    def test_speech_text_strips_web_citations_but_keeps_normal_words(self):
+        cited = ("Radio and web check complete, buddy. "
+                 "([store.steampowered.com](https://store.steampowered.com/app/883710/?utm_source=openai))")
+        self.assertEqual(speech_text(cited), "Radio and web check complete, buddy.")
+        self.assertEqual(speech_text("Check [Steam](https://store.steampowered.com) for details."),
+                         "Check Steam for details.")
+        self.assertEqual(speech_text("Source: https://example.com/path?q=1"), "Source:")
 
 
 if __name__ == "__main__":
