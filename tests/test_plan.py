@@ -18,6 +18,10 @@ def connection_class(openai, refresh):
     return namespace["PlanConnection"]
 
 
+def user_message(text):
+    return [{"role": "user", "content": [{"type": "input_text", "text": text}]}]
+
+
 class PlanTests(unittest.TestCase):
     def setup_connection(self, events):
         client = MagicMock()
@@ -50,7 +54,7 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(deltas, ["First sentence. ", "Second sentence."])
         self.assertEqual(answer, "First sentence. Second sentence.")
 
-    def test_auto_web_exposes_search_tool_and_reports_search_events(self):
+    def test_auto_web_exposes_search_tool_for_fresh_question_and_reports_events(self):
         connection, client, _, _ = self.setup_connection([
             SimpleNamespace(type="response.web_search_call.in_progress"),
             SimpleNamespace(type="response.web_search_call.searching"),
@@ -58,7 +62,8 @@ class PlanTests(unittest.TestCase):
             SimpleNamespace(type="response.output_text.delta", delta="Verified."),
             SimpleNamespace(type="response.completed", response=None)])
         web_events = []
-        answer = connection.answer("prompt", [], threading.Event(), web_policy="auto",
+        answer = connection.answer("prompt", user_message("What's the latest RE2 patch?"),
+                                   threading.Event(), web_policy="auto",
                                    on_web_search=web_events.append)
         self.assertEqual(answer, "Verified.")
         arguments = client.responses.create.call_args.kwargs
@@ -67,6 +72,17 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(web_events, ["response.web_search_call.in_progress",
                                       "response.web_search_call.searching",
                                       "response.web_search_call.completed"])
+
+    def test_auto_web_keeps_routine_game_question_on_no_tool_fast_path(self):
+        connection, client, _, _ = self.setup_connection([
+            SimpleNamespace(type="response.output_text.delta", delta="Go through the west door."),
+            SimpleNamespace(type="response.completed", response=None)])
+        answer = connection.answer("prompt", user_message("How do I get back to the main hall?"),
+                                   threading.Event(), web_policy="auto")
+        self.assertEqual(answer, "Go through the west door.")
+        arguments = client.responses.create.call_args.kwargs
+        self.assertNotIn("tools", arguments)
+        self.assertNotIn("tool_choice", arguments)
 
     def test_required_web_forces_search_and_returns_citations(self):
         citation = SimpleNamespace(type="url_citation", url="https://example.com/guide",
