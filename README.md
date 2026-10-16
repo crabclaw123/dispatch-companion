@@ -48,20 +48,24 @@ model rather than keeping multiple models in memory.
 
 ### Streaming speech
 
-ChatGPT responses are streamed by the plan connection. Dispatch consumes those text deltas as
-they arrive, detects completed sentences, and feeds them to a separate speech worker. That means
-ChatGPT can continue generating sentence 2 while sentence 1 is already being synthesized/spoken.
-F9 still cancels both the request/playback path and queued speech.
+ChatGPT responses are streamed by the plan connection. Dispatch starts speaking as soon as the
+first complete sentence has been synthesized; there is no deliberate multi-sentence buffer.
 
-This is intentionally sentence-by-sentence rather than word-by-word so the voice remains
-natural and does not constantly restart synthesis on tiny fragments.
+Speech now uses a two-stage pipeline. While sentence 1 is playing, a background TTS worker can
+already synthesize sentence 2 (and later queued sentences). When sentence 1 ends, a prefetched
+sentence can start immediately instead of waiting for a fresh Edge TTS request. If the model has
+not generated the next sentence yet, Dispatch still has to wait for the model/web stream; the
+pipeline cannot hide a pause when no next text exists yet.
+
+F9 still cancels the request, queued synthesis, and playback. Sentence-by-sentence streaming is
+kept so Dispatch can begin talking quickly rather than waiting for a full answer.
 
 ### Neural voice note — October 2026
 
 Microsoft changed the Edge Read Aloud handshake in October 2026, which caused `edge-tts 7.2.8`
 and earlier to fall back to Windows speech. Upstream fixed the handshake in `edge-tts 7.3.0`.
-Dispatch now requires `edge-tts>=7.3.0`; run **setup.bat** after pulling this update so the neural
-voice choices work again.
+Dispatch now requires `edge-tts>=7.3.0`; run **setup.bat** after pulling that dependency update so
+the neural voice choices work again.
 
 ### Latency telemetry
 
@@ -70,7 +74,7 @@ After each completed question, the Radio log prints a `LATENCY` line such as:
 `LATENCY · capture 0.08s · transcribe 0.61s · web search 1.20s · first token 2.10s · first sentence 2.42s · speech start 2.42s · model total 3.05s · speech playback 5.87s`
 
 The `web search` field appears only when a live search actually ran. Measurements are also appended
-to `local/performance.log` so multiple runs can be compared. The useful fields are:
+to `local/performance.log` so multiple runs can be compared. The main `LATENCY` fields are:
 
 - **capture** — screenshot preparation time.
 - **transcribe** — local Whisper transcription time.
@@ -80,6 +84,18 @@ to `local/performance.log` so multiple runs can be compared. The useful fields a
 - **speech start** — time from model-request start until the speech worker begins sentence 1.
 - **model total** — time until ChatGPT finishes the full response.
 - **speech playback** — total time spent processing/playing queued speech after sentence 1 begins.
+
+The speech pipeline also writes one `VOICE` line per spoken sentence to `local/performance.log`, for example:
+
+`VOICE · sentence 2 · engine Edge · synth 0.42s · queue wait 0.03s · tts wait 0.00s · audible gap 0.03s · playback 2.18s · prefetched yes`
+
+Those fields tell us what caused a pause:
+
+- **synth** — how long that sentence actually took to synthesize in the background.
+- **queue wait** — time after the previous sentence stopped until the next sentence reached the speech worker; a large value usually means the model/web stream had not produced the next sentence yet.
+- **tts wait** — additional time spent waiting for audio after the sentence was available to speak.
+- **audible gap** — total silence between the previous sentence ending and this sentence beginning.
+- **prefetched yes** — the audio was already synthesized before playback needed it; TTS was successfully hidden behind the previous sentence.
 
 For an apples-to-apples speed comparison, ask the same short question several times with
 **Tiny** and **Base** and compare `transcribe`, `first sentence`, and `speech start` rather than
@@ -120,6 +136,7 @@ stay in memory and refresh as needed during a session.
 | Web lookup request fails | Try another eligible model/session; web search is subject to model/account/workspace policy |
 | Dispatch searched when you wanted maximum speed | Change **Web lookup** to **Asked only** |
 | Explicit “look it up” does not search | Confirm **Web lookup** is Auto or Asked only and check the Radio Log for a web/tool error |
+| Long pause between spoken sentences | Check `VOICE` lines in `local/performance.log`: high queue wait points to model/web generation; high tts wait points to synthesis |
 | First use of a Whisper model sits at preparing/transcribing | Model may be downloading; check console/internet |
 | Tiny mishears words | Switch back to Base; use Small only if accuracy still needs help |
 | Neural voice falls back to Windows | Pull latest, run setup.bat so edge-tts is at least 7.3.0, then check `local/voice-error.log` if it still fails |
@@ -137,7 +154,7 @@ Run tests with:
 
 `core.py`: state/prompt + web relevance gate + TTS-safe citation cleanup; `devices.py`: capture/audio;
 `plan_connection.py`: streamed plan inference/refresh + optional Responses web search + citation extraction;
-`local_voice.py`: selectable Whisper + Edge/Windows speech; `plus_test.py`: OAuth + standalone connection test;
+`local_voice.py`: selectable Whisper + pipelined Edge/Windows speech + per-sentence timing; `plus_test.py`: OAuth + standalone connection test;
 `dispatch.py`: desktop UI, web mode/clickable citations, streaming speech queue, and latency telemetry.
 
 - https://developers.openai.com/siwc/token-sharing-open-source/sign-in
