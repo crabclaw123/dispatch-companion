@@ -4,7 +4,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from core import DEFAULT_STATE, append_turn, build_input, load_state, save_state
+from core import (DEFAULT_STATE, append_turn, build_input, load_state,
+                  requests_web_lookup, save_state)
 
 
 class StateTests(unittest.TestCase):
@@ -50,6 +51,14 @@ class StateTests(unittest.TestCase):
             path.write_text(json.dumps({"history": [{"role": "developer", "content": "bad"},
                                                       {"role": "user", "content": "good"}]}))
             self.assertEqual(load_state(path)["history"], [{"role": "user", "content": "good"}])
+
+    def test_explicit_web_request_phrases_are_detected(self):
+        for question in ("Dispatch, look that up for me.",
+                         "Can you search the web for that?",
+                         "Check online and verify the safe code.",
+                         "Google it, bro."):
+            self.assertTrue(requests_web_lookup(question), question)
+        self.assertFalse(requests_web_lookup("How do I get back to the main hall?"))
 
 
 if __name__ == "__main__":
