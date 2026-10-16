@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import re
 
 SYSTEM_PROMPT = """You are DISPATCH, Cam's calm, practical gaming radio companion.
 Use brief conversational radio replies, usually 2-4 sentences.
@@ -44,9 +45,13 @@ DEFAULT_STATE = {
 }
 
 
+def _normalized_question(question: str) -> str:
+    return " ".join(question.casefold().split())
+
+
 def requests_web_lookup(question: str) -> bool:
     """Return True when the user explicitly asks Dispatch to use the internet."""
-    text = " ".join(question.casefold().split())
+    text = _normalized_question(question)
     phrases = (
         "look up", "look it up", "look that up", "look this up", "look online",
         "search the web", "search web", "search the internet", "search online",
@@ -56,6 +61,46 @@ def requests_web_lookup(question: str) -> bool:
         "verify on the internet", "find it online", "find that online",
     )
     return any(phrase in text for phrase in phrases)
+
+
+def should_offer_web_lookup(question: str) -> bool:
+    """Cheap local gate for Auto mode so routine questions keep the no-tool fast path."""
+    if requests_web_lookup(question):
+        return True
+    text = _normalized_question(question)
+    phrases = (
+        "latest", "newest", "today", "tonight", "right now", "currently",
+        "this week", "this month", "recently", "recent update", "new update",
+        "current price", "current version", "current patch", "current release",
+        "release date", "on sale", "still available", "servers down", "outage",
+        "are you sure", "double check", "double-check", "fact check", "fact-check",
+        "verify that", "verify this", "confirm that", "is that still true",
+        "has that changed", "did that change",
+    )
+    return any(phrase in text for phrase in phrases)
+
+
+def speech_text(text: str) -> str:
+    """Remove URLs/citation markup that should remain visible but never be spoken."""
+    if not text:
+        return ""
+    # Parenthesized Markdown links from web citations are citation-only: drop them entirely.
+    text = re.sub(r"\(\s*\[[^\]]+\]\(https?://[^)\s]+\)\s*\)", "", text)
+
+    def markdown_link(match):
+        label = match.group(1).strip()
+        lowered = label.casefold()
+        if lowered.startswith(("http://", "https://", "www.")) or "." in label:
+            return ""
+        return label
+
+    text = re.sub(r"\[([^\]]+)\]\(https?://[^)\s]+\)", markdown_link, text)
+    text = re.sub(r"https?://\S+", "", text)
+    text = re.sub(r"\bwww\.\S+", "", text)
+    text = re.sub(r"[\*_`]+", "", text)
+    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    text = re.sub(r"\(\s*\)", "", text)
+    return " ".join(text.split()).strip()
 
 
 def load_state(path: Path) -> dict:
